@@ -54,6 +54,33 @@ class GitService:
         result = self._run_git(path, ["rev-parse", "HEAD"])
         return result.stdout.strip()
 
+    def clone_repo(self, repo_url: str, destination_path: str) -> GitResult:
+        dest = Path(destination_path).expanduser().resolve()
+        dest.mkdir(parents=True, exist_ok=True)
+        return self._run_git(str(dest), ["clone", repo_url, "."])
+
+    def fetch(self, path: str) -> GitResult:
+        return self._run_git(path, ["fetch", "--all", "--prune"])
+
+    def checkout(self, path: str, branch: str) -> str:
+        result = self._run_git(path, ["checkout", branch])
+        return result.stdout.strip() or result.stderr.strip()
+
+    def pull(self, path: str) -> str:
+        result = self._run_git(path, ["pull"])
+        return result.stdout.strip()
+
+    def create_or_checkout_branch(self, path: str, branch: str) -> str:
+        result = self._run_git(path, ["checkout", branch], check=False)
+        if result.exit_code == 0:
+            return result.stdout.strip() or result.stderr.strip()
+        result = self._run_git(path, ["checkout", "-b", branch])
+        return result.stdout.strip() or result.stderr.strip()
+
+    def get_remote_url(self, path: str) -> str:
+        result = self._run_git(path, ["remote", "get-url", "origin"])
+        return result.stdout.strip()
+
     def _run_git(
         self,
         path: str,

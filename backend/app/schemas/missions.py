@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import (
     AgentRunStatus,
@@ -12,6 +12,38 @@ from app.models import (
     MissionStatus,
     RepositoryProvider,
 )
+
+
+_VALID_REPO_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
+
+
+class RepositoryCloneRequest(BaseModel):
+    repo_url: str = Field(min_length=1, max_length=2048)
+    default_branch: str = Field(default="main", min_length=1, max_length=255)
+
+    @field_validator("repo_url")
+    @classmethod
+    def validate_repo_url(cls, v: str) -> str:
+        if not v.startswith(_VALID_REPO_URL_PREFIXES):
+            raise ValueError(
+                "repo_url must start with https://, http://, git@, ssh://, or git://"
+            )
+        return v
+
+
+class RepositoryCloneResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    mission_id: UUID
+    provider: RepositoryProvider
+    repo_url: str
+    default_branch: str
+    local_path: str | None
+    github_owner: str | None
+    github_repo: str | None
+    created_at: datetime
+    current_branch: str
 
 
 class MissionCreate(BaseModel):
@@ -150,9 +182,34 @@ class MissionEventRead(BaseModel):
     created_at: datetime
 
 
+class RepoProfileRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    mission_id: UUID
+    frontend_framework: str | None
+    backend_framework: str | None
+    package_manager: str | None
+    language: str | None
+    test_commands: list[str]
+    build_commands: list[str]
+    important_dirs: list[str]
+    has_docker: bool
+    has_ci: bool
+    readme_summary: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class MissionDetailRead(MissionRead):
     milestones: list[MilestoneRead]
     feature_tasks: list[FeatureTaskRead]
     validation_contract: ValidationContractRead | None
     validation_reports: list[ValidationReportRead]
     events: list[MissionEventRead]
+    repo_profile: RepoProfileRead | None = None
+
+
+class OpenPrResponse(BaseModel):
+    pr_url: str
+    branch: str

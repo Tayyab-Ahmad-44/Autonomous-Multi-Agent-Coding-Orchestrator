@@ -30,11 +30,20 @@ class WorkerAgent(BaseAgent):
 
     async def run(self, context: AgentContext, input: AgentInput) -> AgentOutput:
         if context.repo_path is None:
-            raise ValueError("WorkerAgent requires repo_path in AgentContext.")
+            raise ValueError(
+                "Repository workspace is not initialized. "
+                "Clone the repository before running the mission."
+            )
         if context.feature_task_id is None:
             raise ValueError("WorkerAgent requires feature_task_id in AgentContext.")
 
         repo_path = context.repo_path
+        if not repo_path.exists():
+            raise ValueError(
+                f"Repository workspace does not exist on disk: {repo_path}. "
+                "Clone the repository before running the mission."
+            )
+
         validation_contract = _load_validation_contract(context)
         feature_task = input.data
         if self._settings.codex_enabled:
@@ -45,8 +54,30 @@ class WorkerAgent(BaseAgent):
                 validation_contract=validation_contract,
             )
 
+        # Non-codex path: inspect repo, setup branch, capture git state.
+        branch_name = _task_branch_name(context)
+        git_state = _prepare_git_branch(self._git_service, repo_path, branch_name)
+        git_status_before = _capture_git_status(self._git_service, repo_path, git_state)
+
         inspection_results = self._inspect_repository(repo_path)
         artifact_ids = _store_inspection_artifacts(context, inspection_results)
+
+        git_diff = _capture_git_diff(self._git_service, repo_path, git_state)
+        git_status_after = _capture_git_status(self._git_service, repo_path, git_state)
+        changed_files = _parse_changed_files(git_status_after)
+
+        diff_artifact_id = _store_git_diff_artifact(
+            context,
+            branch_name=branch_name,
+            git_state=git_state,
+            git_diff=git_diff,
+            git_status=git_status_after,
+            commit_output=None,
+            latest_commit=None,
+        )
+        if diff_artifact_id is not None:
+            artifact_ids.append(diff_artifact_id)
+
         _mark_feature_task_status(context, FeatureTaskStatus.completed)
 
         return AgentOutput(
@@ -60,7 +91,15 @@ class WorkerAgent(BaseAgent):
                 "worker_report": _worker_report(feature_task, validation_contract),
                 "repo_inspection": [_inspection_result_to_dict(result) for result in inspection_results],
                 "artifact_ids": artifact_ids,
-                "changed_files": [],
+                "changed_files": changed_files,
+                "git": {
+                    "branch_name": branch_name,
+                    "is_git_repo": git_state["is_git_repo"],
+                    "branch_ready": git_state.get("branch_ready", False),
+                    "status_before": git_status_before,
+                    "diff": git_diff,
+                    "has_changes": bool(git_diff.strip()),
+                },
             },
         )
 
@@ -424,6 +463,19 @@ def _format_required_tests(validation_contract: dict[str, Any] | None) -> str:
         command = test.get("command", "")
         lines.append(f"- {name} [{test_type}]: {command}")
     return "\n".join(lines) if lines else "- No required tests were found."
+
+
+def _parse_changed_files(git_status: str) -> list[str]:
+    """Parse `git status --short` output into a list of file paths."""
+    files: list[str] = []
+    for line in git_status.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            files.append(parts[1])
+    return files
 
 
 def _safe_getattr(value: Any, name: str, default: Any) -> Any:

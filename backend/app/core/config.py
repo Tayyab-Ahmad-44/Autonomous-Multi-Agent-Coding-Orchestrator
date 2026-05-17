@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     e2b_api_key: str | None = None
     max_agent_retries: int = Field(default=2, ge=0)
     max_validation_loops: int = Field(default=3, ge=0)
+    workspace_root: str = "/workspaces"
+    github_token: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -17,12 +17,18 @@ from app.schemas import (
     MissionPlanRejection,
     MissionRead,
     MissionStatusUpdate,
+    OpenPrResponse,
+    RepoProfileRead,
+    RepositoryCloneRequest,
+    RepositoryCloneResponse,
     RepositoryCreate,
     RepositoryRead,
     ValidationContractRead,
     ValidationReportRead,
 )
+from app.core.config import get_settings
 from app.services import missions as mission_service
+from app.services.github_service import GitHubService, GitHubServiceError
 
 
 router = APIRouter(prefix="/missions", tags=["missions"])
@@ -133,6 +139,63 @@ def get_repository(mission_id: UUID, db: DbSession) -> RepositoryRead:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
 
     return RepositoryRead.model_validate(repository)
+
+
+@router.post(
+    "/{mission_id}/repository/clone",
+    response_model=RepositoryCloneResponse,
+    status_code=status.HTTP_200_OK,
+)
+def clone_repository(
+    mission_id: UUID,
+    payload: RepositoryCloneRequest,
+    db: DbSession,
+) -> RepositoryCloneResponse:
+    try:
+        result = mission_service.clone_mission_repository(
+            db,
+            mission_id=mission_id,
+            repo_url=payload.repo_url,
+            default_branch=payload.default_branch,
+        )
+    except mission_service.MissionNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mission not found") from None
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+    repo = result.repository
+    return RepositoryCloneResponse(
+        id=repo.id,
+        mission_id=repo.mission_id,
+        provider=repo.provider,
+        repo_url=repo.repo_url,
+        default_branch=repo.default_branch,
+        local_path=repo.local_path,
+        github_owner=repo.github_owner,
+        github_repo=repo.github_repo,
+        created_at=repo.created_at,
+        current_branch=result.current_branch,
+    )
+
+
+@router.post("/{mission_id}/analyze-repo", response_model=RepoProfileRead, status_code=status.HTTP_200_OK)
+def analyze_repo(mission_id: UUID, db: DbSession) -> RepoProfileRead:
+    try:
+        profile = mission_service.analyze_repo_for_mission(db, mission_id)
+    except mission_service.MissionNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mission not found") from None
+    except mission_service.MissionNotReadyError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Repository analysis failed: {exc}",
+        ) from exc
+
+    return RepoProfileRead.model_validate(profile)
 
 
 @router.post("/{mission_id}/plan", response_model=MissionDetailRead)
@@ -348,6 +411,11 @@ def _to_mission_detail(mission: Mission) -> MissionDetailRead:
                 reverse=True,
             )
         ],
+        repo_profile=(
+            RepoProfileRead.model_validate(mission.repo_profile)
+            if hasattr(mission, "repo_profile") and mission.repo_profile is not None
+            else None
+        ),
     )
 
 
@@ -362,6 +430,32 @@ def update_mission_status(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mission not found")
 
     return mission_service.set_mission_status(db, mission, payload.status)
+
+
+@router.post("/{mission_id}/open-pr", response_model=OpenPrResponse)
+def open_pr(mission_id: UUID, db: DbSession) -> OpenPrResponse:
+    settings = get_settings()
+    if not settings.github_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GITHUB_TOKEN is not configured on the server.",
+        )
+
+    github = GitHubService(token=settings.github_token)
+
+    try:
+        result = mission_service.open_mission_pr(db, mission_id=mission_id, github=github)
+    except mission_service.MissionNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mission not found") from None
+    except mission_service.MissionNotReadyError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    return OpenPrResponse(pr_url=result.pr_url, branch=result.branch)
 
 
 @router.delete("/{mission_id}", status_code=status.HTTP_204_NO_CONTENT)

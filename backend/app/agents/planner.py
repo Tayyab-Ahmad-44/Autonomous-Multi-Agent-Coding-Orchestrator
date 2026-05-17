@@ -52,9 +52,10 @@ class PlannerAgent(BaseAgent):
         if not title or not goal:
             raise ValueError("PlannerAgent requires mission title and goal in AgentInput.data.")
 
+        repo_profile = input.data.get("repo_profile")
         raw_plan = await self._llm_service.generate_json(
             system_prompt=_system_prompt(),
-            user_prompt=_user_prompt(title=title, goal=goal),
+            user_prompt=_user_prompt(title=title, goal=goal, repo_profile=repo_profile),
             schema_hint=_schema_hint(),
         )
         plan = PlannerPlan.model_validate(raw_plan)
@@ -83,14 +84,42 @@ Rules:
 - Return only valid JSON."""
 
 
-def _user_prompt(*, title: str, goal: str) -> str:
+def _user_prompt(*, title: str, goal: str, repo_profile: dict | None = None) -> str:
+    repo_section = _format_repo_profile(repo_profile)
     return f"""Plan this mission.
 
 Mission title:
 {title}
 
 Mission goal:
-{goal}"""
+{goal}{repo_section}"""
+
+
+def _format_repo_profile(profile: dict | None) -> str:
+    if not profile:
+        return ""
+    lines = ["\n\nRepository profile:"]
+    if profile.get("language"):
+        lines.append(f"- Language: {profile['language']}")
+    if profile.get("frontend_framework"):
+        lines.append(f"- Frontend: {profile['frontend_framework']}")
+    if profile.get("backend_framework"):
+        lines.append(f"- Backend: {profile['backend_framework']}")
+    if profile.get("package_manager"):
+        lines.append(f"- Package manager: {profile['package_manager']}")
+    if profile.get("test_commands"):
+        lines.append(f"- Test commands: {', '.join(profile['test_commands'])}")
+    if profile.get("build_commands"):
+        lines.append(f"- Build commands: {', '.join(profile['build_commands'])}")
+    if profile.get("important_dirs"):
+        lines.append(f"- Key directories: {', '.join(profile['important_dirs'])}")
+    if profile.get("has_docker"):
+        lines.append("- Docker: yes")
+    if profile.get("has_ci"):
+        lines.append("- CI: yes")
+    if profile.get("readme_summary"):
+        lines.append(f"- README excerpt: {profile['readme_summary'][:300]}")
+    return "\n".join(lines)
 
 
 def _schema_hint() -> dict[str, Any]:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -9,6 +11,9 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.agents import AgentContext, AgentInput, FixPlannerAgent, PlannerAgent, SpecAgent, ValidatorAgent
+from app.core.config import get_settings
+from app.services.git_service import GitService, GitServiceError
+from app.services.github_service import GitHubService, GitHubServiceError
 from app.models import (
     AgentRun,
     AgentRunStatus,
@@ -21,6 +26,7 @@ from app.models import (
     MilestoneStatus,
     Mission,
     MissionStatus,
+    RepoProfile,
     Repository,
     RepositoryProvider,
     ValidationContract,
@@ -72,6 +78,49 @@ def get_repository(db: Session, mission_id: UUID) -> Repository | None:
     return db.scalars(statement).first()
 
 
+def get_repo_profile(db: Session, mission_id: UUID) -> RepoProfile | None:
+    statement = select(RepoProfile).where(RepoProfile.mission_id == mission_id)
+    return db.scalars(statement).first()
+
+
+def save_repo_profile(
+    db: Session,
+    *,
+    mission_id: UUID,
+    frontend_framework: str | None,
+    backend_framework: str | None,
+    package_manager: str | None,
+    language: str | None,
+    test_commands: list[str],
+    build_commands: list[str],
+    important_dirs: list[str],
+    has_docker: bool,
+    has_ci: bool,
+    readme_summary: str | None,
+    raw_data: dict,
+) -> RepoProfile:
+    profile = get_repo_profile(db, mission_id)
+    if profile is None:
+        profile = RepoProfile(mission_id=mission_id)
+        db.add(profile)
+
+    profile.frontend_framework = frontend_framework
+    profile.backend_framework = backend_framework
+    profile.package_manager = package_manager
+    profile.language = language
+    profile.test_commands = test_commands
+    profile.build_commands = build_commands
+    profile.important_dirs = important_dirs
+    profile.has_docker = has_docker
+    profile.has_ci = has_ci
+    profile.readme_summary = readme_summary
+    profile.raw_data = raw_data
+
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
 def get_latest_validation_contract(db: Session, mission_id: UUID) -> ValidationContract | None:
     statement = (
         select(ValidationContract)
@@ -93,6 +142,7 @@ def get_mission_with_details(db: Session, mission_id: UUID) -> Mission | None:
             selectinload(Mission.repository),
             selectinload(Mission.events),
             selectinload(Mission.agent_runs),
+            selectinload(Mission.repo_profile),
         )
         .where(Mission.id == mission_id)
     )
@@ -196,6 +246,127 @@ def upsert_repository(
     db.commit()
     db.refresh(repository)
     return repository
+
+
+@dataclass
+class CloneResult:
+    repository: Repository
+    current_branch: str
+
+
+def clone_mission_repository(
+    db: Session,
+    *,
+    mission_id: UUID,
+    repo_url: str,
+    default_branch: str = "main",
+    git: GitService | None = None,
+) -> CloneResult:
+    mission = get_mission(db, mission_id)
+    if mission is None:
+        raise MissionNotFoundError(f"Mission not found: {mission_id}")
+
+    settings = get_settings()
+    workspace_path = Path(settings.workspace_root) / "missions" / str(mission_id) / "repo"
+    workspace_str = str(workspace_path)
+
+    git_svc = git or GitService()
+
+    try:
+        if workspace_path.exists() and git_svc.is_git_repo(workspace_str):
+            git_svc.fetch(workspace_str)
+        else:
+            git_svc.clone_repo(repo_url, workspace_str)
+
+        git_svc.checkout(workspace_str, default_branch)
+        git_svc.pull(workspace_str)
+
+        mission_branch = f"mission/{str(mission_id)[:8]}"
+        git_svc.create_or_checkout_branch(workspace_str, mission_branch)
+        current_branch = git_svc.current_branch(workspace_str)
+    except GitServiceError as exc:
+        raise RuntimeError(f"Git operation failed: {exc}") from exc
+
+    match = re.search(r"github\.com[:/]([^/]+)/([^/.]+?)(?:\.git)?$", repo_url)
+    if match:
+        provider = RepositoryProvider.github
+        github_owner: str | None = match.group(1)
+        github_repo: str | None = match.group(2)
+    else:
+        provider = RepositoryProvider.local
+        github_owner = None
+        github_repo = None
+
+    repository = upsert_repository(
+        db,
+        mission_id=mission_id,
+        provider=provider,
+        repo_url=repo_url,
+        default_branch=default_branch,
+        local_path=workspace_str,
+        github_owner=github_owner,
+        github_repo=github_repo,
+    )
+
+    log_mission_event(
+        db,
+        mission_id=mission_id,
+        event_type="repository_cloned",
+        message=f"Repository ready at {workspace_str} on branch {current_branch}",
+        payload={"repo_url": repo_url, "local_path": workspace_str, "branch": current_branch},
+    )
+
+    return CloneResult(repository=repository, current_branch=current_branch)
+
+
+def analyze_repo_for_mission(db: Session, mission_id: UUID) -> RepoProfile:
+    from app.services.repo_analysis_service import RepoAnalysisService
+
+    mission = get_mission(db, mission_id)
+    if mission is None:
+        raise MissionNotFoundError(f"Mission not found: {mission_id}")
+
+    repository = get_repository(db, mission_id)
+    if repository is None or not repository.local_path:
+        raise MissionNotReadyError(
+            "Repository must be cloned before running analysis. "
+            "Clone the repository first."
+        )
+
+    local_path = repository.local_path
+    svc = RepoAnalysisService()
+    data = svc.analyze_repo(local_path)
+
+    profile = save_repo_profile(
+        db,
+        mission_id=mission_id,
+        frontend_framework=data.frontend_framework,
+        backend_framework=data.backend_framework,
+        package_manager=data.package_manager,
+        language=data.language,
+        test_commands=data.test_commands,
+        build_commands=data.build_commands,
+        important_dirs=data.important_dirs,
+        has_docker=data.has_docker,
+        has_ci=data.has_ci,
+        readme_summary=data.readme_summary,
+        raw_data=data.raw_data,
+    )
+
+    log_mission_event(
+        db,
+        mission_id=mission_id,
+        event_type="repo_analyzed",
+        message="Repository analysis complete.",
+        payload={
+            "frontend_framework": data.frontend_framework,
+            "backend_framework": data.backend_framework,
+            "language": data.language,
+            "important_dirs": data.important_dirs,
+        },
+    )
+
+    return profile
 
 
 def create_milestone(
@@ -367,11 +538,23 @@ async def run_planning_for_mission(
         raise MissionNotFoundError(f"Mission not found: {mission_id}")
 
     mission = set_mission_status(db, mission, MissionStatus.planning)
+
+    # Auto-analyze repo if cloned but not yet profiled.
+    repo_profile = get_repo_profile(db, mission_id)
+    if repo_profile is None:
+        repository = get_repository(db, mission_id)
+        if repository is not None and repository.local_path:
+            try:
+                repo_profile = analyze_repo_for_mission(db, mission_id)
+            except Exception:
+                repo_profile = None
+
     agent_input = AgentInput(
         instructions="Create an MVP implementation plan for this mission.",
         data={
             "title": mission.title,
             "goal": mission.goal,
+            "repo_profile": _repo_profile_to_dict(repo_profile),
         },
     )
     agent_run = create_agent_run(
@@ -421,6 +604,23 @@ async def run_planning_for_mission(
     if planned_mission is None:
         raise MissionNotFoundError(f"Mission not found after planning: {mission_id}")
     return planned_mission
+
+
+def _repo_profile_to_dict(profile: RepoProfile | None) -> dict | None:
+    if profile is None:
+        return None
+    return {
+        "frontend_framework": profile.frontend_framework,
+        "backend_framework": profile.backend_framework,
+        "package_manager": profile.package_manager,
+        "language": profile.language,
+        "test_commands": profile.test_commands,
+        "build_commands": profile.build_commands,
+        "important_dirs": profile.important_dirs,
+        "has_docker": profile.has_docker,
+        "has_ci": profile.has_ci,
+        "readme_summary": profile.readme_summary,
+    }
 
 
 def _persist_plan(db: Session, *, mission_id: UUID, plan: JsonObject) -> None:
@@ -1328,3 +1528,65 @@ def create_artifact(
     db.commit()
     db.refresh(artifact)
     return artifact
+
+
+@dataclass
+class OpenPrResult:
+    pr_url: str
+    branch: str
+
+
+def open_mission_pr(
+    db: Session,
+    *,
+    mission_id: UUID,
+    github: GitHubService,
+) -> OpenPrResult:
+    mission = get_mission(db, mission_id)
+    if mission is None:
+        raise MissionNotFoundError(f"Mission not found: {mission_id}")
+
+    repository = get_repository(db, mission_id)
+    if repository is None:
+        raise MissionNotReadyError("Mission has no repository. Run /clone first.")
+    if not repository.local_path:
+        raise MissionNotReadyError("Repository has not been cloned yet. Run /clone first.")
+    if not repository.github_owner or not repository.github_repo:
+        raise MissionNotReadyError("Repository is not a GitHub repository.")
+
+    mission_branch = f"mission/{str(mission_id)[:8]}"
+
+    try:
+        github.push_branch(
+            local_path=repository.local_path,
+            branch=mission_branch,
+            owner=repository.github_owner,
+            repo=repository.github_repo,
+        )
+        pr_url = github.create_pull_request(
+            owner=repository.github_owner,
+            repo=repository.github_repo,
+            head=mission_branch,
+            base=repository.default_branch,
+            title=f"[Mission] {mission.title}",
+            body=mission.goal,
+        )
+    except GitHubServiceError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    create_artifact(
+        db,
+        mission_id=mission_id,
+        artifact_type="github_pr",
+        path=pr_url,
+        metadata={"branch": mission_branch, "base": repository.default_branch},
+    )
+    log_mission_event(
+        db,
+        mission_id=mission_id,
+        event_type="pr_opened",
+        message=f"Pull request opened: {pr_url}",
+        payload={"pr_url": pr_url, "branch": mission_branch},
+    )
+
+    return OpenPrResult(pr_url=pr_url, branch=mission_branch)

@@ -145,6 +145,12 @@ class Mission(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    repo_profile: Mapped[RepoProfile | None] = relationship(
+        "RepoProfile",
+        back_populates="mission",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class Milestone(Base):
@@ -407,3 +413,39 @@ class Repository(Base):
     )
 
     mission: Mapped[Mission] = relationship("Mission", back_populates="repository")
+
+
+class RepoProfile(Base):
+    __tablename__ = "repo_profiles"
+    __table_args__ = (UniqueConstraint("mission_id", name="uq_repo_profiles_mission_id"),)
+
+    id: Mapped[PyUUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    mission_id: Mapped[PyUUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("missions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    frontend_framework: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    backend_framework: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    package_manager: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    language: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    test_commands: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    build_commands: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    important_dirs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    has_docker: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_ci: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    readme_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    mission: Mapped[Mission] = relationship("Mission", back_populates="repo_profile")
