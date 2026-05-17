@@ -1,8 +1,8 @@
 # Agent Orchestrator
 
-Factory-style multi-agent coding orchestrator for turning a software goal into planned work, validation contracts, agent jobs, validation reports, and fix tasks.
+Factory-style multi-agent coding orchestrator for turning a software goal into planned work, validation contracts, agent jobs, validation reports, and fix tasks — all against a real GitHub repository.
 
-The project is currently an MVP. The backend is the main product surface. The frontend is a minimal Next.js UI for creating missions and watching them move through the lifecycle.
+The project is currently an MVP. The backend is the main product surface. The frontend is a Next.js UI for creating missions, reviewing plans, and watching live execution.
 
 ## Core Idea
 
@@ -16,14 +16,17 @@ The system then moves through a controlled workflow:
 
 ```text
 Mission
-  -> plan
+  -> clone repository
+  -> analyze repository
+  -> plan (milestones + tasks)
   -> validation contract
   -> human approval
-  -> worker task
+  -> worker tasks (one per feature task)
   -> validation
   -> fix task if validation fails
   -> next milestone
   -> completed
+  -> open GitHub PR
 ```
 
 The orchestrator is the only component that decides the next step.
@@ -46,6 +49,7 @@ Orchestrator -> Agent -> Orchestrator
 - Sandbox MVP: local subprocess execution behind a provider interface
 - Validation: shell, pytest, Playwright, Semgrep
 - Optional coding engine: Codex CLI
+- GitHub: REST API via httpx for push + PR creation
 
 ## Architecture Rules
 
@@ -73,16 +77,31 @@ agent-orchestrator/
       api/
         routes/
       services/
+        git_service.py
+        github_service.py
+        repo_analysis_service.py
+        missions.py
       agents/
       orchestration/
       workers/
     alembic/
+      versions/
+        0001_core_mission_system.py
+        0002_repositories.py
+        0003_mission_events.py
+        0004_repo_profiles.py
     tests/
     requirements.txt
     Dockerfile
   frontend/
     app/
+      missions/
+        new/           <- creation wizard
+        [id]/
+          review/      <- plan approval
+          run/         <- live execution dashboard
     lib/
+      api.ts
     package.json
   docker-compose.yml
   .env.example
@@ -150,11 +169,47 @@ Validator output for a mission or milestone. Failed reports produce fix tasks.
 
 Structured internal event log used by the API and frontend timeline.
 
+### Repository
+
+A GitHub (or local) repository attached to a mission. After cloning, the workspace lives at:
+
+```text
+{WORKSPACE_ROOT}/missions/{mission_id}/repo
+```
+
+The mission branch is:
+
+```text
+mission/{mission_id_short}
+```
+
+Worker task branches are:
+
+```text
+mission/{mission_id_short}/task/{task_id_short}
+```
+
+### RepoProfile
+
+Automatic analysis of the cloned repository, run before planning. Detects:
+
+- Frontend framework (Next.js, React, Vue, Angular, Svelte)
+- Backend framework (FastAPI, Django, Flask, Express, Fastify)
+- Package manager (pnpm, yarn, npm, poetry, pip)
+- Language (Python, JavaScript/TypeScript)
+- Test commands
+- Build commands
+- Key directories
+- Docker and CI presence
+- README excerpt
+
+The planner includes the repo profile in its prompt to generate more accurate tasks.
+
 ## Agents
 
 ### PlannerAgent
 
-Creates milestones and feature tasks from the mission title and goal.
+Creates milestones and feature tasks from the mission title, goal, and (when available) repo profile.
 
 ### SpecAgent
 
@@ -162,14 +217,16 @@ Creates the validation contract from the mission goal, milestones, and feature t
 
 ### WorkerAgent
 
-Executes one feature task.
+Executes one feature task against the cloned repository.
 
 Current behavior:
 
-- If `CODEX_ENABLED=false`, it inspects the repository and produces a no-edit report.
-- If `CODEX_ENABLED=true`, it calls the Codex CLI to perform code changes.
-
-The worker also handles branch setup, diff capture, artifacts, and feature task status updates.
+- Creates or checks out a task branch.
+- If `CODEX_ENABLED=false`, inspects the repository and produces a no-edit report.
+- If `CODEX_ENABLED=true`, calls the Codex CLI to perform code changes.
+- Captures git diff and status as an Artifact.
+- Commits if `AUTO_COMMIT=true` and there are changes.
+- Marks the feature task completed or failed.
 
 ### ValidatorAgent
 
@@ -224,6 +281,8 @@ Backend variables:
 | `CODEX_COMMAND` | `codex` | Codex CLI command name |
 | `CODEX_ALLOW_COMMITS` | `false` | Tells Codex whether commits are allowed in prompt rules |
 | `AUTO_COMMIT` | `false` | Worker commits changes after Codex if true |
+| `WORKSPACE_ROOT` | `/workspaces` | Root directory for cloned mission repositories |
+| `GITHUB_TOKEN` | empty | GitHub personal access token for push and PR creation |
 | `SANDBOX_PROVIDER` | `local` | Sandbox provider: `local` or `e2b` |
 | `E2B_API_KEY` | empty | Required only for future E2B provider execution |
 | `MAX_AGENT_RETRIES` | `2` | Failed worker retry limit per task |
@@ -260,8 +319,8 @@ uv venv env
 uv pip install --python env\Scripts\python.exe -r requirements.txt
 copy ..\.env.example .env
 
-env\Scripts\python.exe -m alembic upgrade head
-env\Scripts\python.exe -m uvicorn app.main:app --reload
+env\Scripts\alembic.exe upgrade head
+env\Scripts\uvicorn.exe app.main:app --reload
 ```
 
 Backend runs at:
@@ -319,6 +378,39 @@ Frontend runs at:
 http://localhost:3000/missions
 ```
 
+## Frontend Screens
+
+### /missions/new — Creation wizard
+
+Four-step wizard:
+
+1. **Mission details** — title and goal.
+2. **Repository** — GitHub URL and default branch.
+3. **Clone** — auto-triggers clone, shows local path and mission branch on success.
+4. **Next steps** — optionally generate plan and validation contract before heading to the review screen.
+
+### /missions/{id}/review — Plan review
+
+Shows the mission goal, repository info, repo profile (when analyzed), plan milestones and tasks, and validation contract side by side.
+
+Action bar adapts to current state:
+
+- No plan → **Generate plan** (primary).
+- Plan + no contract → **Generate validation contract** (primary) + Regenerate plan (ghost).
+- Plan + contract → **Approve plan** (primary, redirects to run dashboard) + regenerate buttons.
+- Repository cloned → **Analyze repo** / **Re-analyze repo** (ghost).
+
+### /missions/{id}/run — Live execution dashboard
+
+Live SSE updates (every 2 seconds). Shows:
+
+- Progress bar (completed tasks / total tasks).
+- Milestone and task status with failure highlighting.
+- Latest validation report and issues.
+- Event timeline (last 20 events).
+- Toolbar: **Tick** (advance orchestrator), **Validate**, **Open PR** (when completed), **Refresh**.
+- PR banner with link after a pull request is opened.
+
 ## Main API Endpoints
 
 ### Health
@@ -336,6 +428,24 @@ GET /missions/{mission_id}
 PATCH /missions/{mission_id}/status
 DELETE /missions/{mission_id}
 ```
+
+### Repository Endpoints
+
+```http
+POST /missions/{mission_id}/repository/clone
+GET /missions/{mission_id}/repository
+POST /missions/{mission_id}/repository         (manual attach)
+```
+
+`/repository/clone` clones the GitHub repo into the workspace, checks out the default branch, creates the mission branch, and saves the local path.
+
+### Repository Analysis
+
+```http
+POST /missions/{mission_id}/analyze-repo
+```
+
+Inspects the cloned repository and saves a `RepoProfile`. Automatically runs before planning if the repo is cloned and no profile exists.
 
 ### Planning and Contract
 
@@ -370,7 +480,7 @@ Advances the mission by one orchestrator decision.
 
 Tick behavior:
 
-- If no plan exists, create one.
+- If no plan exists, create one (and auto-analyze repo if needed).
 - If no validation contract exists, create one.
 - If waiting for approval, stop.
 - If agent runs are queued/running, stop.
@@ -388,35 +498,15 @@ Tick behavior:
 POST /missions/{mission_id}/validate
 ```
 
-Runs the current validation contract against the configured repository path.
+Runs the current validation contract against the cloned repository.
 
-### Repository
-
-```http
-POST /missions/{mission_id}/repository
-GET /missions/{mission_id}/repository
-```
-
-MVP supports local repository paths.
-
-Example:
-
-```json
-{
-  "provider": "local",
-  "repo_url": "https://github.com/user/repo",
-  "default_branch": "main",
-  "local_path": "D:\\Personal\\Projects\\SomeRepo"
-}
-```
-
-### Feature Task Execution
+### GitHub PR
 
 ```http
-POST /feature-tasks/{task_id}/run
+POST /missions/{mission_id}/open-pr
 ```
 
-Queues a worker AgentRun for a feature task. If the task already has a queued or running AgentRun, the existing run is returned instead of creating a duplicate.
+Pushes the mission branch to GitHub and opens a pull request. Returns the PR URL. Requires `GITHUB_TOKEN` to be set. If a PR already exists for the branch, returns the existing PR URL.
 
 ### Server-Sent Events
 
@@ -428,21 +518,20 @@ Streams the mission detail snapshot every 2 seconds. The frontend uses this to a
 
 ## Example Mission Flow
 
-1. Create a mission.
-2. Generate plan.
-3. Generate validation contract.
-4. Add repository config.
-5. Approve plan.
-6. Call `/tick`.
-7. Worker task is queued.
-8. Celery worker executes the task.
-9. Call `/tick` again.
-10. Validation runs.
-11. If validation fails, fix tasks are created.
-12. Run fix tasks.
-13. Tick again.
-14. If validation passes, next milestone starts.
-15. Repeat until mission is completed.
+1. Create a mission (`POST /missions`).
+2. Clone the repository (`POST /missions/{id}/repository/clone`).
+3. Analyze the repository (`POST /missions/{id}/analyze-repo`) — optional, auto-runs before planning.
+4. Generate plan (`POST /missions/{id}/plan`).
+5. Generate validation contract (`POST /missions/{id}/validation-contract`).
+6. Approve plan (`POST /missions/{id}/approve-plan`).
+7. Call `/tick` — worker task queued.
+8. Celery worker executes the task on the cloned repo.
+9. Call `/tick` again — validation runs.
+10. If validation fails, fix tasks are created.
+11. Run fix tasks via further ticks.
+12. If validation passes, next milestone starts.
+13. Repeat until mission is completed.
+14. Open PR (`POST /missions/{id}/open-pr`).
 
 ## Validation Support
 
@@ -470,7 +559,7 @@ or:
 
 ### Playwright
 
-Playwright commands run inside the configured local repository path.
+Playwright commands run inside the cloned repository path.
 
 Install Playwright in the target repository:
 
@@ -517,7 +606,7 @@ The sandbox service is provider-based.
 SANDBOX_PROVIDER=local
 ```
 
-Runs commands with Python subprocess in the configured local repository path.
+Runs commands with Python subprocess in the cloned repository path.
 
 ### E2B
 
@@ -537,7 +626,7 @@ CODEX_ENABLED=true
 CODEX_COMMAND=codex
 ```
 
-When enabled, `WorkerAgent` calls the Codex CLI from the repository path with a prompt containing:
+When enabled, `WorkerAgent` calls the Codex CLI from the task branch with a prompt containing:
 
 - mission goal
 - feature task title and description
@@ -553,12 +642,6 @@ Worker rules include:
 - summarize changes
 - do not commit unless asked
 
-The worker creates or checks out a branch:
-
-```text
-mission/{mission_id_short}/task/{task_id_short}
-```
-
 After Codex runs, the worker captures the git diff as an artifact.
 
 If `AUTO_COMMIT=true`, the worker commits changes with:
@@ -567,13 +650,43 @@ If `AUTO_COMMIT=true`, the worker commits changes with:
 Task: {feature_task.title}
 ```
 
+## GitHub Integration
+
+### Clone
+
+`POST /missions/{id}/repository/clone` clones the repository into:
+
+```text
+{WORKSPACE_ROOT}/missions/{mission_id}/repo
+```
+
+The mission branch is checked out or created. The local path is saved to the repository record.
+
+### Push and PR
+
+`POST /missions/{id}/open-pr` requires `GITHUB_TOKEN` in `.env`.
+
+```env
+GITHUB_TOKEN=ghp_...
+```
+
+The endpoint:
+
+1. Detects GitHub owner and repo from the repository URL.
+2. Pushes the current mission branch to the remote.
+3. Opens a pull request against the default branch.
+4. Stores the PR URL as an artifact.
+5. Returns `{ "pr_url": "...", "branch": "..." }`.
+
+If a PR for the branch already exists, the existing PR URL is returned.
+
 ## Testing
 
 Run all backend tests with pytest:
 
 ```powershell
 cd agent-orchestrator/backend
-env\Scripts\python.exe -m pytest -q
+env\Scripts\pytest.exe -q
 ```
 
 Run Python compile check:
@@ -593,7 +706,8 @@ Current tests cover:
 - repository support
 - sandbox providers
 - Codex service wrapper
-- Git service
+- Git service (clone, fetch, checkout, pull, branch, diff, status, commit)
+- GitHub service (URL parsing, push, PR creation, duplicate PR handling)
 - validator support for shell, pytest, Playwright, and Semgrep
 - full lifecycle with failed validation, fix task creation, passing validation, milestone completion, and mission completion
 
@@ -603,44 +717,31 @@ Run migrations:
 
 ```powershell
 cd agent-orchestrator/backend
-env\Scripts\python.exe -m alembic upgrade head
+env\Scripts\alembic.exe upgrade head
 ```
 
 Show current migration head:
 
 ```powershell
-env\Scripts\python.exe -m alembic heads
+env\Scripts\alembic.exe heads
 ```
 
-## Frontend Features
+Migration history:
 
-The current Next.js frontend supports:
-
-- create mission
-- list missions
-- mission detail view
-- mission status
-- milestones
-- feature tasks
-- validation contract
-- validation reports
-- event timeline
-- actions:
-  - generate plan
-  - generate validation contract
-  - approve plan
-  - tick mission
-  - validate mission
-- live updates through SSE
+| Revision | Description |
+| --- | --- |
+| `0001_core_mission_system` | missions, milestones, feature tasks, agent runs, validation contracts, validation reports, artifacts |
+| `0002_repositories` | repositories table |
+| `0003_mission_events` | mission events table |
+| `0004_repo_profiles` | repo profiles table |
 
 ## Current Limitations
 
-- GitHub integration is not implemented yet.
 - E2B sandbox execution is only a skeleton.
 - Worker code edits require Codex CLI and `CODEX_ENABLED=true`.
 - Without Codex, workers only inspect repositories and mark tasks completed.
-- Validators execute commands from the validation contract, so use trusted repositories and commands for now.
-- The frontend is intentionally minimal.
+- Validators execute commands from the validation contract — use trusted repositories and commands.
+- The Pause/Resume buttons in the run dashboard are placeholders (no backend support yet).
 
 ## Troubleshooting
 
@@ -686,6 +787,24 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
 Then restart the frontend dev server.
+
+### Clone fails with authentication error
+
+For private repositories, embed a token in the URL:
+
+```text
+https://x-access-token:{GITHUB_TOKEN}@github.com/org/repo.git
+```
+
+Or set `GITHUB_TOKEN` in `.env` — the clone service does not use it automatically; provide an authenticated URL directly.
+
+### Open PR fails with "GITHUB_TOKEN is not configured"
+
+Set in `backend/.env`:
+
+```env
+GITHUB_TOKEN=ghp_...
+```
 
 ### `pip` is missing in the uv-created env
 
