@@ -33,3 +33,4 @@ frontend/*.log
 Thumbs.db
 .vscode/
 .idea/
+workspaces/

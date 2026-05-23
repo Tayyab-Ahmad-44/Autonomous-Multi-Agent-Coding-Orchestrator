@@ -62,52 +62,6 @@ Orchestrator -> Agent -> Orchestrator
 - FixPlanner creates fix tasks from failed validation reports.
 - If retry or validation-loop limits are exceeded, the mission becomes `failed` and requires human intervention.
 
-## Project Structure
-
-```text
-agent-orchestrator/
-  backend/
-    app/
-      main.py
-      core/
-        config.py
-        database.py
-      models/
-      schemas/
-      api/
-        routes/
-      services/
-        git_service.py
-        github_service.py
-        repo_analysis_service.py
-        missions.py
-      agents/
-      orchestration/
-      workers/
-    alembic/
-      versions/
-        0001_core_mission_system.py
-        0002_repositories.py
-        0003_mission_events.py
-        0004_repo_profiles.py
-    tests/
-    requirements.txt
-    Dockerfile
-  frontend/
-    app/
-      missions/
-        new/           <- creation wizard
-        [id]/
-          review/      <- plan approval
-          run/         <- live execution dashboard
-    lib/
-      api.ts
-    package.json
-  docker-compose.yml
-  .env.example
-  README.md
-```
-
 ## Main Concepts
 
 ### Mission
@@ -264,7 +218,7 @@ Create a backend `.env` file in `backend/.env` if you run backend commands from 
 You can start from the root example:
 
 ```powershell
-cd agent-orchestrator/backend
+cd backend
 copy ..\.env.example .env
 ```
 
@@ -299,7 +253,6 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 Start PostgreSQL and Redis:
 
 ```powershell
-cd agent-orchestrator
 docker compose up
 ```
 
@@ -313,7 +266,7 @@ This exposes:
 From another terminal:
 
 ```powershell
-cd agent-orchestrator/backend
+cd backend
 
 uv venv env
 uv pip install --python env\Scripts\python.exe -r requirements.txt
@@ -329,30 +282,12 @@ Backend runs at:
 http://localhost:8000
 ```
 
-Health check:
-
-```powershell
-curl http://localhost:8000/health
-```
-
-Expected response:
-
-```json
-{"status":"ok"}
-```
-
-API docs:
-
-```text
-http://localhost:8000/docs
-```
-
 ## Run Celery Worker
 
 Run this in a separate terminal:
 
 ```powershell
-cd agent-orchestrator/backend
+cd backend
 env\Scripts\celery.exe -A app.workers.celery_app.celery_app worker --loglevel=info --pool=solo
 ```
 
@@ -365,7 +300,7 @@ For tests, tasks are usually run directly or mocked.
 ## Run Frontend
 
 ```powershell
-cd agent-orchestrator/frontend
+cd frontend
 
 copy .env.example .env.local
 npm.cmd install
@@ -377,144 +312,6 @@ Frontend runs at:
 ```text
 http://localhost:3000/missions
 ```
-
-## Frontend Screens
-
-### /missions/new — Creation wizard
-
-Four-step wizard:
-
-1. **Mission details** — title and goal.
-2. **Repository** — GitHub URL and default branch.
-3. **Clone** — auto-triggers clone, shows local path and mission branch on success.
-4. **Next steps** — optionally generate plan and validation contract before heading to the review screen.
-
-### /missions/{id}/review — Plan review
-
-Shows the mission goal, repository info, repo profile (when analyzed), plan milestones and tasks, and validation contract side by side.
-
-Action bar adapts to current state:
-
-- No plan → **Generate plan** (primary).
-- Plan + no contract → **Generate validation contract** (primary) + Regenerate plan (ghost).
-- Plan + contract → **Approve plan** (primary, redirects to run dashboard) + regenerate buttons.
-- Repository cloned → **Analyze repo** / **Re-analyze repo** (ghost).
-
-### /missions/{id}/run — Live execution dashboard
-
-Live SSE updates (every 2 seconds). Shows:
-
-- Progress bar (completed tasks / total tasks).
-- Milestone and task status with failure highlighting.
-- Latest validation report and issues.
-- Event timeline (last 20 events).
-- Toolbar: **Tick** (advance orchestrator), **Validate**, **Open PR** (when completed), **Refresh**.
-- PR banner with link after a pull request is opened.
-
-## Main API Endpoints
-
-### Health
-
-```http
-GET /health
-```
-
-### Missions
-
-```http
-POST /missions
-GET /missions
-GET /missions/{mission_id}
-PATCH /missions/{mission_id}/status
-DELETE /missions/{mission_id}
-```
-
-### Repository Endpoints
-
-```http
-POST /missions/{mission_id}/repository/clone
-GET /missions/{mission_id}/repository
-POST /missions/{mission_id}/repository         (manual attach)
-```
-
-`/repository/clone` clones the GitHub repo into the workspace, checks out the default branch, creates the mission branch, and saves the local path.
-
-### Repository Analysis
-
-```http
-POST /missions/{mission_id}/analyze-repo
-```
-
-Inspects the cloned repository and saves a `RepoProfile`. Automatically runs before planning if the repo is cloned and no profile exists.
-
-### Planning and Contract
-
-```http
-POST /missions/{mission_id}/plan
-POST /missions/{mission_id}/validation-contract
-POST /missions/{mission_id}/orchestrate
-```
-
-`/orchestrate` generates a plan and validation contract, then sets the mission to `waiting_for_approval`.
-
-### Approval
-
-```http
-POST /missions/{mission_id}/approve-plan
-POST /missions/{mission_id}/reject-plan
-```
-
-Approval requires:
-
-- milestones
-- feature tasks
-- validation contract
-
-### Tick Loop
-
-```http
-POST /missions/{mission_id}/tick
-```
-
-Advances the mission by one orchestrator decision.
-
-Tick behavior:
-
-- If no plan exists, create one (and auto-analyze repo if needed).
-- If no validation contract exists, create one.
-- If waiting for approval, stop.
-- If agent runs are queued/running, stop.
-- If a task failed and retries remain, queue retry.
-- If a task failed and retries are exhausted, fail mission.
-- If a pending task exists, queue worker.
-- If all current milestone tasks are complete, run validation.
-- If validation fails, create fix tasks.
-- If validation passes, advance milestone.
-- If all milestones pass, complete mission.
-
-### Validation
-
-```http
-POST /missions/{mission_id}/validate
-```
-
-Runs the current validation contract against the cloned repository.
-
-### GitHub PR
-
-```http
-POST /missions/{mission_id}/open-pr
-```
-
-Pushes the mission branch to GitHub and opens a pull request. Returns the PR URL. Requires `GITHUB_TOKEN` to be set. If a PR already exists for the branch, returns the existing PR URL.
-
-### Server-Sent Events
-
-```http
-GET /missions/{mission_id}/events
-```
-
-Streams the mission detail snapshot every 2 seconds. The frontend uses this to auto-refresh mission status, tasks, validation reports, and timeline events.
 
 ## Example Mission Flow
 
@@ -685,7 +482,7 @@ If a PR for the branch already exists, the existing PR URL is returned.
 Run all backend tests with pytest:
 
 ```powershell
-cd agent-orchestrator/backend
+cd backend
 env\Scripts\pytest.exe -q
 ```
 
@@ -716,7 +513,7 @@ Current tests cover:
 Run migrations:
 
 ```powershell
-cd agent-orchestrator/backend
+cd backend
 env\Scripts\alembic.exe upgrade head
 ```
 
@@ -764,7 +561,7 @@ postgresql+psycopg2://postgres:postgres@localhost:5432/agent_orchestrator
 Start Celery:
 
 ```powershell
-cd agent-orchestrator/backend
+cd backend
 env\Scripts\celery.exe -A app.workers.celery_app.celery_app worker --loglevel=info --pool=solo
 ```
 
