@@ -1,3 +1,5 @@
+from app.schemas.auth import LoginRequest, SignupRequest, TokenResponse, UserRead
+from app.schemas.repos import RepoCreate, RepoRead
 from app.schemas.missions import (
     AgentRunRead,
     FeatureTaskRead,
@@ -10,7 +12,6 @@ from app.schemas.missions import (
     MissionStatusUpdate,
     OpenPrResponse,
     RepoProfileRead,
-    RepositoryCloneRequest,
     RepositoryCloneResponse,
     RepositoryCreate,
     RepositoryRead,
@@ -21,6 +22,7 @@ from app.schemas.missions import (
 __all__ = [
     "AgentRunRead",
     "FeatureTaskRead",
+    "LoginRequest",
     "MilestoneRead",
     "MissionCreate",
     "MissionDetailRead",
@@ -29,11 +31,15 @@ __all__ = [
     "MissionRead",
     "MissionStatusUpdate",
     "OpenPrResponse",
+    "RepoCreate",
     "RepoProfileRead",
-    "RepositoryCloneRequest",
+    "RepoRead",
     "RepositoryCloneResponse",
     "RepositoryCreate",
     "RepositoryRead",
+    "SignupRequest",
+    "TokenResponse",
+    "UserRead",
     "ValidationContractRead",
     "ValidationReportRead",
 ]

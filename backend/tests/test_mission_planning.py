@@ -12,6 +12,7 @@ from app.api.routes.missions import get_planner_agent
 from app.core.database import Base, get_db
 from app.main import app
 from app.models import AgentRun, AgentRunStatus, FeatureTask, Milestone, MissionStatus
+from tests.factories import override_current_user, persist_test_repo, persist_test_user
 
 
 class SuccessfulPlanner:
@@ -73,6 +74,11 @@ class MissionPlanningEndpointTests(TestCase):
                 db.close()
 
         app.dependency_overrides[get_db] = override_get_db
+
+        self.user = persist_test_user(self.session_local)
+        self.repo = persist_test_repo(self.session_local, user_id=self.user.id)
+        override_current_user(app, self.user)
+
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
@@ -84,7 +90,11 @@ class MissionPlanningEndpointTests(TestCase):
         app.dependency_overrides[get_planner_agent] = lambda: SuccessfulPlanner()
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
 
         response = self.client.post(f"/missions/{mission['id']}/plan")
@@ -108,7 +118,11 @@ class MissionPlanningEndpointTests(TestCase):
         app.dependency_overrides[get_planner_agent] = lambda: FailingPlanner()
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
 
         response = self.client.post(f"/missions/{mission['id']}/plan")

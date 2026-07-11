@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models import (
     AgentRunStatus,
@@ -12,25 +12,6 @@ from app.models import (
     MissionStatus,
     RepositoryProvider,
 )
-
-
-_VALID_REPO_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
-
-
-class RepositoryCloneRequest(BaseModel):
-    repo_url: str = Field(min_length=1, max_length=2048)
-    default_branch: str = Field(default="main", min_length=1, max_length=255)
-
-    @field_validator("repo_url")
-    @classmethod
-    def validate_repo_url(cls, v: str) -> str:
-        if not v.startswith(_VALID_REPO_URL_PREFIXES):
-            raise ValueError(
-                "repo_url must start with https://, http://, git@, ssh://, or git://"
-            )
-        return v
-
-
 class RepositoryCloneResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -47,6 +28,7 @@ class RepositoryCloneResponse(BaseModel):
 
 
 class MissionCreate(BaseModel):
+    repo_id: UUID
     title: str = Field(min_length=1, max_length=255)
     goal: str = Field(min_length=1)
 
@@ -92,6 +74,8 @@ class MissionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    owner_id: UUID
+    repo_id: UUID
     title: str
     goal: str
     status: MissionStatus

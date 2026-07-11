@@ -15,6 +15,7 @@ from app.core.database import Base, get_db
 from app.main import app
 from app.models import Artifact, AgentRun, AgentRunStatus, FeatureTaskType, RepositoryProvider, ValidationReport
 from app.services import missions as mission_service
+from tests.factories import override_current_user, persist_test_repo, persist_test_user
 
 
 class ValidationAgentEndpointTests(TestCase):
@@ -43,6 +44,11 @@ class ValidationAgentEndpointTests(TestCase):
                 db.close()
 
         app.dependency_overrides[get_db] = override_get_db
+
+        self.user = persist_test_user(self.session_local)
+        self.repo = persist_test_repo(self.session_local, user_id=self.user.id)
+        override_current_user(app, self.user)
+
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
@@ -241,6 +247,8 @@ class ValidationAgentEndpointTests(TestCase):
         with self.session_local() as db:
             mission = mission_service.create_mission(
                 db,
+                owner_id=self.user.id,
+                repo_id=self.repo.id,
                 title="Build login system",
                 goal="Build email/password auth in this repo",
             )

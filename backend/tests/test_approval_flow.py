@@ -22,6 +22,7 @@ from app.models import (
     ValidationContract,
 )
 from app.services import missions as mission_service
+from tests.factories import override_current_user, persist_test_repo, persist_test_user
 
 
 class ApprovalFlowEndpointTests(TestCase):
@@ -42,6 +43,11 @@ class ApprovalFlowEndpointTests(TestCase):
                 db.close()
 
         app.dependency_overrides[get_db] = override_get_db
+
+        self.user = persist_test_user(self.session_local)
+        self.repo = persist_test_repo(self.session_local, user_id=self.user.id)
+        override_current_user(app, self.user)
+
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
@@ -98,7 +104,11 @@ class ApprovalFlowEndpointTests(TestCase):
     def _create_planned_mission(self, *, include_contract: bool) -> dict:
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
         mission_id = UUID(mission["id"])
         with self.session_local() as db:

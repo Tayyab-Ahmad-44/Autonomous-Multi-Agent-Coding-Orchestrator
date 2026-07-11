@@ -12,6 +12,7 @@ import {
   postMissionAction,
   ValidationReport,
 } from "../../../lib/api";
+import { RequireAuth } from "../../../components/RequireAuth";
 
 const actions = [
   ["Generate plan", "plan"],
@@ -22,6 +23,14 @@ const actions = [
 ] as const;
 
 export default function MissionDetailPage() {
+  return (
+    <RequireAuth>
+      <MissionDetailPageContent />
+    </RequireAuth>
+  );
+}
+
+function MissionDetailPageContent() {
   const params = useParams<{ id: string }>();
   const missionId = params.id;
   const [mission, setMission] = useState<MissionDetail | null>(null);

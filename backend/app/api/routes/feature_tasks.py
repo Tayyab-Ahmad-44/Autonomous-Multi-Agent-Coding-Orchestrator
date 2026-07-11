@@ -2,7 +2,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
 
-from app.api.deps import DbSession
+from app.api.deps import CurrentUser, DbSession
 from app.models import FeatureTaskStatus
 from app.schemas import AgentRunRead
 from app.services import missions as mission_service
@@ -13,13 +13,13 @@ router = APIRouter(prefix="/feature-tasks", tags=["feature-tasks"])
 
 
 @router.post("/{task_id}/run", response_model=AgentRunRead, status_code=status.HTTP_202_ACCEPTED)
-def run_feature_task(task_id: UUID, db: DbSession) -> AgentRunRead:
+def run_feature_task(task_id: UUID, current_user: CurrentUser, db: DbSession) -> AgentRunRead:
     feature_task = mission_service.get_feature_task(db, task_id)
     if feature_task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feature task not found")
 
     mission = mission_service.get_mission_with_details(db, feature_task.mission_id)
-    if mission is None:
+    if mission is None or mission.owner_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mission not found")
 
     active_run = mission_service.get_active_agent_run_for_feature_task(mission, feature_task.id)

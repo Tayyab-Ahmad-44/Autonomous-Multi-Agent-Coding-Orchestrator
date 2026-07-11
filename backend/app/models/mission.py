@@ -11,10 +11,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
 from app.core.database import Base
-
-
-def enum_values(enum_class: type[enum.Enum]) -> list[str]:
-    return [item.value for item in enum_class]
+from app.models.enums import RepositoryProvider, enum_values
+from app.models.repo import Repo
+from app.models.user import User
 
 
 class MissionStatus(str, enum.Enum):
@@ -60,15 +59,20 @@ class AgentRunStatus(str, enum.Enum):
     completed = "completed"
 
 
-class RepositoryProvider(str, enum.Enum):
-    github = "github"
-    local = "local"
-
-
 class Mission(Base):
     __tablename__ = "missions"
 
     id: Mapped[PyUUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    owner_id: Mapped[PyUUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    repo_id: Mapped[PyUUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("repos.id"),
+        nullable=False,
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     goal: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[MissionStatus] = mapped_column(
@@ -98,6 +102,8 @@ class Mission(Base):
         nullable=False,
     )
 
+    owner: Mapped[User] = relationship("User")
+    repo: Mapped[Repo] = relationship("Repo")
     current_milestone: Mapped[Milestone | None] = relationship(
         "Milestone",
         foreign_keys=[current_milestone_id],
@@ -402,6 +408,11 @@ class Repository(Base):
         ForeignKey("missions.id", ondelete="CASCADE"),
         nullable=False,
     )
+    repo_id: Mapped[PyUUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("repos.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     provider: Mapped[RepositoryProvider] = mapped_column(
         Enum(RepositoryProvider, name="repository_provider", values_callable=enum_values),
         nullable=False,
@@ -418,6 +429,7 @@ class Repository(Base):
     )
 
     mission: Mapped[Mission] = relationship("Mission", back_populates="repository")
+    repo: Mapped[Repo | None] = relationship("Repo")
 
 
 class RepoProfile(Base):

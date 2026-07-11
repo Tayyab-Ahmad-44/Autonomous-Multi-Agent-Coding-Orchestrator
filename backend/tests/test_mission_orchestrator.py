@@ -35,6 +35,7 @@ from app.models import (
 from app.orchestration.mission_graph import build_mission_graph
 from app.services import missions as mission_service
 from app.workers.tasks import run_agent_task
+from tests.factories import override_current_user, persist_test_repo, persist_test_user
 
 
 class OrchestratorPlanner:
@@ -217,6 +218,11 @@ class MissionOrchestratorEndpointTests(TestCase):
         app.dependency_overrides[get_db] = override_get_db
         app.dependency_overrides[get_planner_agent] = lambda: OrchestratorPlanner()
         app.dependency_overrides[get_spec_agent] = lambda: OrchestratorSpec()
+
+        self.user = persist_test_user(self.session_local)
+        self.repo = persist_test_repo(self.session_local, user_id=self.user.id)
+        override_current_user(app, self.user)
+
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
@@ -234,7 +240,11 @@ class MissionOrchestratorEndpointTests(TestCase):
     def test_create_mission_records_event_and_detail_returns_timeline(self) -> None:
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
 
         response = self.client.get(f"/missions/{mission['id']}")
@@ -254,7 +264,11 @@ class MissionOrchestratorEndpointTests(TestCase):
     def test_orchestrate_endpoint_creates_plan_contract_and_waits_for_approval(self) -> None:
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
 
         response = self.client.post(f"/missions/{mission['id']}/orchestrate")
@@ -294,7 +308,11 @@ class MissionOrchestratorEndpointTests(TestCase):
     def test_mission_event_stream_emits_current_mission_snapshot(self) -> None:
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
 
         with self.session_local() as db:
@@ -312,7 +330,11 @@ class MissionOrchestratorEndpointTests(TestCase):
         app.dependency_overrides[get_spec_agent] = lambda: PassingTickSpec()
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
 
         planned = self.client.post(f"/missions/{mission['id']}/tick")
@@ -487,7 +509,11 @@ class MissionOrchestratorEndpointTests(TestCase):
         app.dependency_overrides[get_spec_agent] = lambda: FailingTickSpec()
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
 
         self.client.post(f"/missions/{mission['id']}/tick")
@@ -531,6 +557,8 @@ class MissionOrchestratorEndpointTests(TestCase):
         with self.session_local() as db:
             mission = mission_service.create_mission(
                 db,
+                owner_id=self.user.id,
+                repo_id=self.repo.id,
                 title="Build login system",
                 goal="Build email/password auth in this repo",
             )
@@ -620,7 +648,11 @@ class MissionOrchestratorEndpointTests(TestCase):
     def _create_planned_approved_single_task_mission(self) -> dict:
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
         self.client.post(f"/missions/{mission['id']}/tick")
         self.client.post(f"/missions/{mission['id']}/tick")

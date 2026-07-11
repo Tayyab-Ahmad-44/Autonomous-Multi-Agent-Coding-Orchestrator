@@ -17,6 +17,8 @@ from app.models.mission import (
     ValidationContract,
     ValidationReport,
 )
+from app.models.repo import Repo
+from app.models.user import User
 
 __all__ = [
     "AgentRun",
@@ -31,9 +33,11 @@ __all__ = [
     "MilestoneStatus",
     "Mission",
     "MissionStatus",
+    "Repo",
     "RepoProfile",
     "Repository",
     "RepositoryProvider",
+    "User",
     "ValidationContract",
     "ValidationReport",
 ]

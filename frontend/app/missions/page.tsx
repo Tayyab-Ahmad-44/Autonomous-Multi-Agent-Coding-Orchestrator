@@ -3,8 +3,17 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { listMissions, Mission } from "../../lib/api";
+import { RequireAuth } from "../../components/RequireAuth";
 
 export default function MissionsPage() {
+  return (
+    <RequireAuth>
+      <MissionsPageContent />
+    </RequireAuth>
+  );
+}
+
+function MissionsPageContent() {
   const [missions, setMissions] = useState<Mission[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);

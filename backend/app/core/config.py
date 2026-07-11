@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     max_validation_loops: int = Field(default=3, ge=0)
     workspace_root: str = "/workspaces"
     github_token: str | None = None
+    jwt_secret_key: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = Field(default=60, ge=1)
 
     model_config = SettingsConfigDict(
         env_file=".env",

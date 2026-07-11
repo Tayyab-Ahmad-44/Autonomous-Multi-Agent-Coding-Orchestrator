@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import feature_tasks_router, missions_router
+from app.api.routes import auth_router, feature_tasks_router, missions_router, repos_router
 
 
 app = FastAPI(title="Agent Orchestrator")
@@ -11,8 +11,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
 app.include_router(feature_tasks_router)
 app.include_router(missions_router)
+app.include_router(repos_router)
 
 
 @app.get("/health")

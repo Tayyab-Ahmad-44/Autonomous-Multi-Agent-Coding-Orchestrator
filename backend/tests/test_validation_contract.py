@@ -14,6 +14,7 @@ from app.core.database import Base, get_db
 from app.main import app
 from app.models import AgentRun, AgentRunStatus, FeatureTaskType, ValidationContract
 from app.services import missions as mission_service
+from tests.factories import override_current_user, persist_test_repo, persist_test_user
 
 
 class SuccessfulSpec:
@@ -70,6 +71,11 @@ class ValidationContractEndpointTests(TestCase):
                 db.close()
 
         app.dependency_overrides[get_db] = override_get_db
+
+        self.user = persist_test_user(self.session_local)
+        self.repo = persist_test_repo(self.session_local, user_id=self.user.id)
+        override_current_user(app, self.user)
+
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
@@ -116,7 +122,11 @@ class ValidationContractEndpointTests(TestCase):
     def test_validation_contract_endpoint_requires_plan(self) -> None:
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
 
         response = self.client.post(f"/missions/{mission['id']}/validation-contract")
@@ -126,7 +136,11 @@ class ValidationContractEndpointTests(TestCase):
     def _create_mission_with_plan(self) -> dict:
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
         mission_id = UUID(mission["id"])
         with self.session_local() as db:

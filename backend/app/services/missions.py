@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +13,7 @@ from app.agents import AgentContext, AgentInput, FixPlannerAgent, PlannerAgent, 
 from app.core.config import get_settings
 from app.services.git_service import GitService, GitServiceError
 from app.services.github_service import GitHubService, GitHubServiceError
+from app.services.repos import get_repo, parse_repo_url
 from app.models import (
     AgentRun,
     AgentRunStatus,
@@ -27,6 +27,7 @@ from app.models import (
     MilestoneStatus,
     Mission,
     MissionStatus,
+    Repo,
     RepoProfile,
     Repository,
     RepositoryProvider,
@@ -47,8 +48,15 @@ class MissionNotReadyError(ValueError):
     pass
 
 
-def create_mission(db: Session, *, title: str, goal: str) -> Mission:
-    mission = Mission(title=title, goal=goal, status=MissionStatus.draft)
+class RepoNotFoundError(ValueError):
+    pass
+
+
+def create_mission(db: Session, *, owner_id: UUID, repo_id: UUID, title: str, goal: str) -> Mission:
+    if get_repo(db, repo_id=repo_id, user_id=owner_id) is None:
+        raise RepoNotFoundError(f"Repo not found: {repo_id}")
+
+    mission = Mission(owner_id=owner_id, repo_id=repo_id, title=title, goal=goal, status=MissionStatus.draft)
     db.add(mission)
     db.commit()
     db.refresh(mission)
@@ -162,8 +170,14 @@ def get_mission_for_spec(db: Session, mission_id: UUID) -> Mission | None:
     return db.scalars(statement).first()
 
 
-def list_missions(db: Session, *, offset: int = 0, limit: int = 100) -> list[Mission]:
-    statement = select(Mission).order_by(Mission.created_at.desc()).offset(offset).limit(limit)
+def list_missions(db: Session, *, owner_id: UUID, offset: int = 0, limit: int = 100) -> list[Mission]:
+    statement = (
+        select(Mission)
+        .where(Mission.owner_id == owner_id)
+        .order_by(Mission.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     return list(db.scalars(statement).all())
 
 
@@ -219,6 +233,7 @@ def upsert_repository(
     local_path: str | None = None,
     github_owner: str | None = None,
     github_repo: str | None = None,
+    repo_id: UUID | None = None,
 ) -> Repository:
     mission = get_mission(db, mission_id)
     if mission is None:
@@ -228,6 +243,7 @@ def upsert_repository(
     if repository is None:
         repository = Repository(
             mission_id=mission_id,
+            repo_id=repo_id,
             provider=provider,
             repo_url=repo_url,
             default_branch=default_branch,
@@ -236,6 +252,8 @@ def upsert_repository(
             github_repo=github_repo,
         )
     else:
+        if repo_id is not None:
+            repository.repo_id = repo_id
         repository.provider = provider
         repository.repo_url = repo_url
         repository.default_branch = default_branch
@@ -259,13 +277,15 @@ def clone_mission_repository(
     db: Session,
     *,
     mission_id: UUID,
-    repo_url: str,
-    default_branch: str = "main",
     git: GitService | None = None,
 ) -> CloneResult:
     mission = get_mission(db, mission_id)
     if mission is None:
         raise MissionNotFoundError(f"Mission not found: {mission_id}")
+
+    repo = db.get(Repo, mission.repo_id)
+    repo_url = repo.repo_url
+    default_branch = repo.default_branch
 
     settings = get_settings()
     workspace_path = Path(settings.workspace_root) / "missions" / str(mission_id) / "repo"
@@ -288,19 +308,12 @@ def clone_mission_repository(
     except GitServiceError as exc:
         raise RuntimeError(f"Git operation failed: {exc}") from exc
 
-    match = re.search(r"github\.com[:/]([^/]+)/([^/.]+?)(?:\.git)?$", repo_url)
-    if match:
-        provider = RepositoryProvider.github
-        github_owner: str | None = match.group(1)
-        github_repo: str | None = match.group(2)
-    else:
-        provider = RepositoryProvider.local
-        github_owner = None
-        github_repo = None
+    provider, github_owner, github_repo = parse_repo_url(repo_url)
 
     repository = upsert_repository(
         db,
         mission_id=mission_id,
+        repo_id=repo.id,
         provider=provider,
         repo_url=repo_url,
         default_branch=default_branch,

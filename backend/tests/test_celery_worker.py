@@ -20,6 +20,7 @@ from app.models import Artifact, AgentRun, AgentRunStatus, FeatureTaskStatus, Fe
 from app.services.codex_service import CodexResult
 from app.services import missions as mission_service
 from app.workers.tasks import run_agent_task
+from tests.factories import override_current_user, persist_test_repo, persist_test_user
 
 
 class CeleryWorkerTests(TestCase):
@@ -53,6 +54,11 @@ class CeleryWorkerTests(TestCase):
                 db.close()
 
         app.dependency_overrides[get_db] = override_get_db
+
+        self.user = persist_test_user(self.session_local)
+        self.repo = persist_test_repo(self.session_local, user_id=self.user.id)
+        override_current_user(app, self.user)
+
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
@@ -202,7 +208,9 @@ class CeleryWorkerTests(TestCase):
 
     def test_run_agent_task_stores_errors(self) -> None:
         with self.session_local() as db:
-            mission = mission_service.create_mission(db, title="Build login", goal="Build auth")
+            mission = mission_service.create_mission(
+                db, owner_id=self.user.id, repo_id=self.repo.id, title="Build login", goal="Build auth"
+            )
             agent_run = mission_service.create_agent_run(
                 db,
                 mission_id=mission.id,
@@ -277,7 +285,9 @@ class CeleryWorkerTests(TestCase):
         self.assertEqual(agent_runs[0].status, AgentRunStatus.queued)
 
     def _create_feature_task(self, db):
-        mission = mission_service.create_mission(db, title="Build login", goal="Build auth")
+        mission = mission_service.create_mission(
+            db, owner_id=self.user.id, repo_id=self.repo.id, title="Build login", goal="Build auth"
+        )
         milestone = mission_service.create_milestone(
             db,
             mission_id=mission.id,

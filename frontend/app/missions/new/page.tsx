@@ -4,16 +4,20 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
 import {
   Mission,
+  Repo,
   RepositoryCloneResponse,
-  attachOrCloneRepository,
+  cloneRepository,
   createMission,
+  createRepo,
   generatePlan,
   generateValidationContract,
+  listRepos,
 } from "../../../lib/api";
+import { RequireAuth } from "../../../components/RequireAuth";
 
 // ── Step indicator ────────────────────────────────────────────────────────────
 
-const STEP_LABELS = ["Mission details", "Repository", "Clone", "Next steps"];
+const STEP_LABELS = ["Repository", "Mission details", "Clone", "Next steps"];
 
 function StepIndicator({ current }: { current: number }) {
   return (
@@ -86,11 +90,140 @@ function Btn({
   );
 }
 
-// ── Step 1: Mission details ───────────────────────────────────────────────────
+// ── Step 1: Choose or add a repository ────────────────────────────────────────
+
+function RepoPickerStep({
+  onNext,
+}: {
+  onNext: (repo: Repo) => void;
+}) {
+  const [repos, setRepos] = useState<Repo[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [selectedRepoId, setSelectedRepoId] = useState<string | null>(null);
+  const [showAddForm, setShowAddForm] = useState(false);
+
+  const [repoUrl, setRepoUrl] = useState("");
+  const [defaultBranch, setDefaultBranch] = useState("main");
+  const [addError, setAddError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  useEffect(() => {
+    listRepos()
+      .then((fetched) => {
+        setRepos(fetched);
+        setShowAddForm(fetched.length === 0);
+      })
+      .catch((err: Error) => setLoadError(err.message));
+  }, []);
+
+  async function onAddRepo(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAddError(null);
+    if (!repoUrl.startsWith("https://") && !repoUrl.startsWith("git@")) {
+      setAddError("Repo URL must start with https:// or git@");
+      return;
+    }
+    setAdding(true);
+    try {
+      const repo = await createRepo({ repo_url: repoUrl, default_branch: defaultBranch });
+      setRepos((prev) => [repo, ...(prev ?? [])]);
+      setSelectedRepoId(repo.id);
+      setShowAddForm(false);
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : "Failed to add repository");
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  const selectedRepo = repos?.find((r) => r.id === selectedRepoId) ?? null;
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-slate-600">
+        Pick a repository the orchestrator already knows about, or connect a new one.
+      </p>
+
+      {loadError && <ErrorBanner message={loadError} />}
+
+      {repos && repos.length > 0 && (
+        <ul className="space-y-2">
+          {repos.map((repo) => (
+            <li key={repo.id}>
+              <label className="flex cursor-pointer items-center gap-3 rounded-md border border-line bg-white p-3 has-[:checked]:border-accent has-[:checked]:bg-accent/5">
+                <input
+                  type="radio"
+                  name="repo"
+                  checked={selectedRepoId === repo.id}
+                  onChange={() => setSelectedRepoId(repo.id)}
+                />
+                <div className="min-w-0">
+                  <p className="truncate font-mono text-xs text-ink">{repo.repo_url}</p>
+                  <p className="text-xs text-slate-500">Default branch: {repo.default_branch}</p>
+                </div>
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {!showAddForm && (
+        <button
+          type="button"
+          className="text-sm font-medium text-accent hover:underline"
+          onClick={() => setShowAddForm(true)}
+        >
+          + Add a new repository
+        </button>
+      )}
+
+      {showAddForm && (
+        <form className="space-y-4 rounded-md border border-line bg-panel p-4" onSubmit={onAddRepo}>
+          <label className="block">
+            <span className="text-sm font-medium">Repository URL</span>
+            <input
+              className="mt-1 w-full rounded-md border border-line px-3 py-2 font-mono text-sm outline-none focus:border-accent"
+              value={repoUrl}
+              onChange={(e) => setRepoUrl(e.target.value)}
+              required
+              placeholder="https://github.com/org/repo"
+            />
+          </label>
+          <label className="block">
+            <span className="text-sm font-medium">Default branch</span>
+            <input
+              className="mt-1 w-full rounded-md border border-line px-3 py-2 font-mono text-sm outline-none focus:border-accent"
+              value={defaultBranch}
+              onChange={(e) => setDefaultBranch(e.target.value)}
+              required
+              placeholder="main"
+            />
+          </label>
+          {addError && <ErrorBanner message={addError} />}
+          <div className="flex justify-end">
+            <Btn type="submit" disabled={adding}>
+              {adding ? "Adding…" : "Add repository"}
+            </Btn>
+          </div>
+        </form>
+      )}
+
+      <div className="flex justify-end border-t border-line pt-4">
+        <Btn disabled={!selectedRepo} onClick={() => selectedRepo && onNext(selectedRepo)}>
+          Continue →
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+// ── Step 2: Mission details ───────────────────────────────────────────────────
 
 function MissionDetailsStep({
+  repoId,
   onCreated,
 }: {
+  repoId: string;
   onCreated: (mission: Mission) => void;
 }) {
   const [title, setTitle] = useState("");
@@ -103,7 +236,7 @@ function MissionDetailsStep({
     setError(null);
     setSaving(true);
     try {
-      const mission = await createMission({ title, goal });
+      const mission = await createMission({ repo_id: repoId, title, goal });
       onCreated(mission);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create mission");
@@ -145,72 +278,15 @@ function MissionDetailsStep({
   );
 }
 
-// ── Step 2: Repository setup ──────────────────────────────────────────────────
-
-function RepositorySetupStep({
-  onNext,
-}: {
-  onNext: (repoUrl: string, defaultBranch: string) => void;
-}) {
-  const [repoUrl, setRepoUrl] = useState("");
-  const [defaultBranch, setDefaultBranch] = useState("main");
-  const [error, setError] = useState<string | null>(null);
-
-  function onSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError(null);
-    if (!repoUrl.startsWith("https://") && !repoUrl.startsWith("git@")) {
-      setError("Repo URL must start with https:// or git@");
-      return;
-    }
-    onNext(repoUrl, defaultBranch);
-  }
-
-  return (
-    <form className="space-y-4" onSubmit={onSubmit}>
-      <p className="text-sm text-slate-600">
-        Connect a GitHub repository so the orchestrator can read and modify code in a dedicated
-        mission branch.
-      </p>
-      <label className="block">
-        <span className="text-sm font-medium">Repository URL</span>
-        <input
-          className="mt-1 w-full rounded-md border border-line px-3 py-2 font-mono text-sm outline-none focus:border-accent"
-          value={repoUrl}
-          onChange={(e) => setRepoUrl(e.target.value)}
-          required
-          placeholder="https://github.com/org/repo"
-        />
-      </label>
-      <label className="block">
-        <span className="text-sm font-medium">Default branch</span>
-        <input
-          className="mt-1 w-full rounded-md border border-line px-3 py-2 font-mono text-sm outline-none focus:border-accent"
-          value={defaultBranch}
-          onChange={(e) => setDefaultBranch(e.target.value)}
-          required
-          placeholder="main"
-        />
-      </label>
-      {error && <ErrorBanner message={error} />}
-      <div className="flex justify-end">
-        <Btn type="submit">Clone repository →</Btn>
-      </div>
-    </form>
-  );
-}
-
 // ── Step 3: Clone status ──────────────────────────────────────────────────────
 
 function CloneStatusStep({
   missionId,
   repoUrl,
-  defaultBranch,
   onSuccess,
 }: {
   missionId: string;
   repoUrl: string;
-  defaultBranch: string;
   onSuccess: (result: RepositoryCloneResponse) => void;
 }) {
   const [status, setStatus] = useState<"cloning" | "success" | "error">("cloning");
@@ -221,7 +297,7 @@ function CloneStatusStep({
     setStatus("cloning");
     setError(null);
     try {
-      const res = await attachOrCloneRepository(missionId, { repo_url: repoUrl, default_branch: defaultBranch });
+      const res = await cloneRepository(missionId);
       setResult(res);
       setStatus("success");
       onSuccess(res);
@@ -429,21 +505,28 @@ function ActionRow({
 // ── Main wizard page ──────────────────────────────────────────────────────────
 
 export default function NewMissionPage() {
+  return (
+    <RequireAuth>
+      <NewMissionPageContent />
+    </RequireAuth>
+  );
+}
+
+function NewMissionPageContent() {
   const [step, setStep] = useState(0);
+  const [selectedRepo, setSelectedRepo] = useState<Repo | null>(null);
   const [mission, setMission] = useState<Mission | null>(null);
-  const [repoUrl, setRepoUrl] = useState("");
-  const [defaultBranch, setDefaultBranch] = useState("main");
   const [cloneResult, setCloneResult] = useState<RepositoryCloneResponse | null>(null);
 
   const stepTitles = [
+    "Choose a repository",
     "Create your mission",
-    "Attach a repository",
     "Cloning repository",
     "Start orchestration",
   ];
   const stepSubtitles = [
+    "Pick or connect the repo the agents will work in.",
     "Define the goal the orchestrator will plan around.",
-    "Connect a GitHub repo for the agents to work in.",
     "The backend is setting up the workspace.",
     "Kick off the agents or head to the mission view.",
   ];
@@ -461,29 +544,28 @@ export default function NewMissionPage() {
         <h2 className="mb-4 text-base font-medium text-ink">{stepTitles[step]}</h2>
 
         {step === 0 && (
-          <MissionDetailsStep
-            onCreated={(m) => {
-              setMission(m);
+          <RepoPickerStep
+            onNext={(repo) => {
+              setSelectedRepo(repo);
               setStep(1);
             }}
           />
         )}
 
-        {step === 1 && (
-          <RepositorySetupStep
-            onNext={(url, branch) => {
-              setRepoUrl(url);
-              setDefaultBranch(branch);
+        {step === 1 && selectedRepo && (
+          <MissionDetailsStep
+            repoId={selectedRepo.id}
+            onCreated={(m) => {
+              setMission(m);
               setStep(2);
             }}
           />
         )}
 
-        {step === 2 && mission && (
+        {step === 2 && mission && selectedRepo && (
           <CloneStatusStep
             missionId={mission.id}
-            repoUrl={repoUrl}
-            defaultBranch={defaultBranch}
+            repoUrl={selectedRepo.repo_url}
             onSuccess={(res) => {
               setCloneResult(res);
               setStep(3);

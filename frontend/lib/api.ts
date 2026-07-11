@@ -1,7 +1,34 @@
+import { getToken } from "./token";
+
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+export type User = {
+  id: string;
+  email: string;
+  created_at: string;
+};
+
+export type TokenResponse = {
+  access_token: string;
+  token_type: string;
+};
+
+export type Repo = {
+  id: string;
+  user_id: string;
+  provider: string;
+  repo_url: string;
+  default_branch: string;
+  github_owner: string | null;
+  github_repo: string | null;
+  created_at: string;
+  updated_at: string;
+};
 
 export type Mission = {
   id: string;
+  owner_id: string;
+  repo_id: string;
   title: string;
   goal: string;
   status: string;
@@ -109,10 +136,12 @@ export type RepositoryCloneResponse = Repository & {
 };
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken();
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
   });
@@ -123,11 +152,40 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   return response.json() as Promise<T>;
 }
 
+export function signup(payload: { email: string; password: string }) {
+  return apiFetch<User>("/auth/signup", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function login(payload: { email: string; password: string }) {
+  return apiFetch<TokenResponse>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchMe() {
+  return apiFetch<User>("/auth/me");
+}
+
+export function listRepos() {
+  return apiFetch<Repo[]>("/repos");
+}
+
+export function createRepo(payload: { repo_url: string; default_branch: string }) {
+  return apiFetch<Repo>("/repos", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function listMissions() {
   return apiFetch<Mission[]>("/missions");
 }
 
-export function createMission(payload: { title: string; goal: string }) {
+export function createMission(payload: { repo_id: string; title: string; goal: string }) {
   return apiFetch<Mission>("/missions", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -144,13 +202,9 @@ export function postMissionAction<T>(id: string, action: string) {
   });
 }
 
-export function attachOrCloneRepository(
-  missionId: string,
-  payload: { repo_url: string; default_branch: string },
-) {
+export function cloneRepository(missionId: string) {
   return apiFetch<RepositoryCloneResponse>(`/missions/${missionId}/repository/clone`, {
     method: "POST",
-    body: JSON.stringify(payload),
   });
 }
 

@@ -18,6 +18,7 @@ from app.core.database import Base, get_db
 from app.main import app
 from app.models import AgentRun, AgentRunStatus, FeatureTask, FeatureTaskType, MissionStatus
 from app.workers.tasks import run_agent_task
+from tests.factories import override_current_user, persist_test_repo, persist_test_user
 
 
 class LifecyclePlanner:
@@ -99,6 +100,7 @@ class LifecycleContext:
     client: TestClient
     session_local: sessionmaker
     repo_path: Path
+    repo_id: str
 
 
 @pytest.fixture
@@ -135,11 +137,16 @@ def lifecycle_context(tmp_path: Path) -> Iterator[LifecycleContext]:
     app.dependency_overrides[get_planner_agent] = lambda: LifecyclePlanner()
     app.dependency_overrides[get_spec_agent] = lambda: LifecycleSpec()
 
+    user = persist_test_user(session_local)
+    repo = persist_test_repo(session_local, user_id=user.id)
+    override_current_user(app, user)
+
     try:
         yield LifecycleContext(
             client=TestClient(app),
             session_local=session_local,
             repo_path=repo_path,
+            repo_id=str(repo.id),
         )
     finally:
         app.dependency_overrides.clear()
@@ -157,6 +164,7 @@ def test_mission_lifecycle_failed_validation_fix_then_completion(
     created = client.post(
         "/missions",
         json={
+            "repo_id": lifecycle_context.repo_id,
             "title": "Build lifecycle",
             "goal": "Exercise the orchestrator lifecycle in tests.",
         },

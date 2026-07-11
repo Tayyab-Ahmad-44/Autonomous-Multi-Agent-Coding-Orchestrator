@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
 from app.main import app
+from tests.factories import override_current_user, persist_test_repo, persist_test_user
 
 
 class RepositorySupportEndpointTests(TestCase):
@@ -29,6 +30,11 @@ class RepositorySupportEndpointTests(TestCase):
                 db.close()
 
         app.dependency_overrides[get_db] = override_get_db
+
+        self.user = persist_test_user(self.session_local)
+        self.repo = persist_test_repo(self.session_local, user_id=self.user.id)
+        override_current_user(app, self.user)
+
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
@@ -39,7 +45,11 @@ class RepositorySupportEndpointTests(TestCase):
     def test_mission_can_have_repository_config(self) -> None:
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
 
         created = self.client.post(
@@ -66,7 +76,11 @@ class RepositorySupportEndpointTests(TestCase):
     def test_local_repository_requires_local_path(self) -> None:
         mission = self.client.post(
             "/missions",
-            json={"title": "Build login system", "goal": "Build email/password auth in this repo"},
+            json={
+                "repo_id": str(self.repo.id),
+                "title": "Build login system",
+                "goal": "Build email/password auth in this repo",
+            },
         ).json()
 
         response = self.client.post(

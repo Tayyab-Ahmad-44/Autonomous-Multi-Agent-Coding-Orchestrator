@@ -15,6 +15,7 @@ from app.core.database import Base
 from app.models import FeatureTaskType
 from app.services import missions as mission_service
 from app.services.codex_service import CodexResult
+from tests.factories import persist_test_repo, persist_test_user
 
 
 class FakeCodexService:
@@ -129,6 +130,8 @@ class MissionDecisionMemoryTests(TestCase):
         Base.metadata.create_all(bind=self.engine)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.repo_path = Path(self.temp_dir.name)
+        self.user = persist_test_user(self.session_local)
+        self.repo = persist_test_repo(self.session_local, user_id=self.user.id)
 
     def tearDown(self) -> None:
         Base.metadata.drop_all(bind=self.engine)
@@ -137,7 +140,9 @@ class MissionDecisionMemoryTests(TestCase):
 
     def _create_feature_task(self, *, title: str, description: str, task_type: FeatureTaskType):
         with self.session_local() as db:
-            mission = mission_service.create_mission(db, title="Build login system", goal="Build auth")
+            mission = mission_service.create_mission(
+                db, owner_id=self.user.id, repo_id=self.repo.id, title="Build login system", goal="Build auth"
+            )
             milestone = mission_service.create_milestone(
                 db,
                 mission_id=mission.id,
@@ -281,7 +286,9 @@ class MissionDecisionMemoryTests(TestCase):
 
     def test_planner_prompt_includes_prior_mission_decisions(self) -> None:
         with self.session_local() as db:
-            mission = mission_service.create_mission(db, title="Build app", goal="Build a web app")
+            mission = mission_service.create_mission(
+                db, owner_id=self.user.id, repo_id=self.repo.id, title="Build app", goal="Build a web app"
+            )
             mission_service.create_mission_decision(
                 db,
                 mission_id=mission.id,
@@ -307,7 +314,9 @@ class MissionDecisionMemoryTests(TestCase):
 
     def test_second_worker_task_prompt_includes_decision_from_first_task(self) -> None:
         with self.session_local() as db:
-            mission = mission_service.create_mission(db, title="Build app", goal="Build a web app")
+            mission = mission_service.create_mission(
+                db, owner_id=self.user.id, repo_id=self.repo.id, title="Build app", goal="Build a web app"
+            )
             milestone = mission_service.create_milestone(
                 db,
                 mission_id=mission.id,
