@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   API_BASE_URL,
   FeatureTask,
@@ -15,6 +15,7 @@ import {
   ValidationReport,
 } from "../../../lib/api";
 import { RequireAuth } from "../../../components/RequireAuth";
+import { getToken } from "../../../lib/token";
 import { Btn, ErrorBanner, StatusBadge } from "../../../components/ui";
 
 const ADVANCED_ACTIONS = [
@@ -22,6 +23,38 @@ const ADVANCED_ACTIONS = [
   ["Regenerate validation contract", "validation-contract"],
   ["Validate now", "validate"],
 ] as const;
+
+const FLASH_DURATION_MS = 1500;
+
+function useStatusChangeFlash(items: { id: string; status: string }[]) {
+  const prevStatuses = useRef<Map<string, string>>(new Map());
+  const [flashing, setFlashing] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    const prev = prevStatuses.current;
+    const changed: string[] = [];
+    for (const item of items) {
+      const prevStatus = prev.get(item.id);
+      if (prevStatus !== undefined && prevStatus !== item.status) {
+        changed.push(item.id);
+      }
+      prev.set(item.id, item.status);
+    }
+    if (changed.length === 0) return;
+
+    setFlashing((current) => new Set([...current, ...changed]));
+    const timer = setTimeout(() => {
+      setFlashing((current) => {
+        const next = new Set(current);
+        for (const id of changed) next.delete(id);
+        return next;
+      });
+    }, FLASH_DURATION_MS);
+    return () => clearTimeout(timer);
+  }, [items]);
+
+  return flashing;
+}
 
 export default function MissionDetailPage() {
   return (
@@ -51,7 +84,13 @@ function MissionDetailPageContent() {
   }, [refresh]);
 
   useEffect(() => {
-    const source = new EventSource(`${API_BASE_URL}/missions/${missionId}/events`);
+    const token = getToken();
+    if (!token) return;
+    // EventSource can't send an Authorization header, so the token travels
+    // as a query param for this one streaming endpoint (see CurrentUserFromStream).
+    const source = new EventSource(
+      `${API_BASE_URL}/missions/${missionId}/events?token=${encodeURIComponent(token)}`,
+    );
     source.addEventListener("open", () => setLiveState("live"));
     source.addEventListener("mission", (event) => {
       setLiveState("live");
@@ -82,6 +121,8 @@ function MissionDetailPageContent() {
   }
 
   const tasksByMilestone = useMemo(() => groupTasksByMilestone(mission?.feature_tasks ?? []), [mission]);
+  const flashingTaskIds = useStatusChangeFlash(mission?.feature_tasks ?? []);
+  const flashingMilestoneIds = useStatusChangeFlash(mission?.milestones ?? []);
 
   if (!mission) {
     return (
@@ -179,6 +220,8 @@ function MissionDetailPageContent() {
               key={milestone.id}
               milestone={milestone}
               tasks={tasksByMilestone.get(milestone.id) ?? []}
+              milestoneFlashing={flashingMilestoneIds.has(milestone.id)}
+              flashingTaskIds={flashingTaskIds}
             />
           ))}
         </section>
@@ -226,7 +269,17 @@ function AdvancedActions({
   );
 }
 
-function MilestonePanel({ milestone, tasks }: { milestone: Milestone; tasks: FeatureTask[] }) {
+function MilestonePanel({
+  milestone,
+  tasks,
+  milestoneFlashing,
+  flashingTaskIds,
+}: {
+  milestone: Milestone;
+  tasks: FeatureTask[];
+  milestoneFlashing: boolean;
+  flashingTaskIds: Set<string>;
+}) {
   return (
     <div className="rounded-md border border-line bg-white">
       <div className="flex items-start justify-between gap-4 border-b border-line px-4 py-3">
@@ -234,7 +287,9 @@ function MilestonePanel({ milestone, tasks }: { milestone: Milestone; tasks: Fea
           <h3 className="font-medium">{milestone.order_index}. {milestone.name}</h3>
           <p className="mt-1 text-sm text-slate-600">{milestone.description}</p>
         </div>
-        <StatusBadge value={milestone.status} />
+        <FlashRing active={milestoneFlashing}>
+          <StatusBadge value={milestone.status} />
+        </FlashRing>
       </div>
       <div className="divide-y divide-line">
         {tasks.length === 0 ? <EmptyState text="No tasks in this milestone." /> : null}
@@ -248,12 +303,26 @@ function MilestonePanel({ milestone, tasks }: { milestone: Milestone; tasks: Fea
                 </div>
                 <p className="mt-1 text-sm text-slate-600">{task.description}</p>
               </div>
-              <StatusBadge value={task.status} />
+              <FlashRing active={flashingTaskIds.has(task.id)}>
+                <StatusBadge value={task.status} />
+              </FlashRing>
             </div>
           </div>
         ))}
       </div>
     </div>
+  );
+}
+
+function FlashRing({ active, children }: { active: boolean; children: React.ReactNode }) {
+  return (
+    <span
+      className={`inline-block shrink-0 rounded-md ring-2 ring-offset-1 transition-shadow duration-700 ${
+        active ? "ring-accent/60" : "ring-transparent"
+      }`}
+    >
+      {children}
+    </span>
   );
 }
 

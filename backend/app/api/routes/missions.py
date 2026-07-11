@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import CurrentUser, DbSession
+from app.api.deps import CurrentUser, CurrentUserFromStream, DbSession
 from app.agents import FixPlannerAgent, PlannerAgent, SpecAgent, ValidatorAgent
 from app.models import Mission, User
 from app.orchestration.mission_graph import (
@@ -94,7 +94,7 @@ def get_mission(mission_id: UUID, current_user: CurrentUser, db: DbSession) -> M
 
 
 @router.get("/{mission_id}/events")
-async def mission_events(mission_id: UUID, current_user: CurrentUser, db: DbSession) -> StreamingResponse:
+async def mission_events(mission_id: UUID, current_user: CurrentUserFromStream, db: DbSession) -> StreamingResponse:
     mission = mission_service.get_mission_with_details(db, mission_id)
     if mission is None or mission.owner_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mission not found")
