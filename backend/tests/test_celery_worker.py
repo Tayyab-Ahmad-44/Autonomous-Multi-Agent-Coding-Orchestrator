@@ -127,8 +127,8 @@ class CeleryWorkerTests(TestCase):
             duration_seconds=1.0,
         )
         branch_name = (
-            f"mission/{str(feature_task.mission_id).split('-')[0]}"
-            f"/task/{str(feature_task.id).split('-')[0]}"
+            f"task/{str(feature_task.mission_id).split('-')[0]}"
+            f"/{str(feature_task.id).split('-')[0]}"
         )
         current_branch = {"name": "main"}
 

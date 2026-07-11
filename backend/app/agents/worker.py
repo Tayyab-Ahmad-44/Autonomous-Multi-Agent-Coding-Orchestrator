@@ -419,7 +419,11 @@ def _worker_report(
 def _task_branch_name(context: AgentContext) -> str:
     mission_short = str(context.mission_id).split("-")[0]
     task_short = str(context.feature_task_id).split("-")[0]
-    return f"mission/{mission_short}/task/{task_short}"
+    # Must not be a prefix of (or nested under) the mission's own branch,
+    # "mission/{mission_short}" (created on clone) - git can't have a ref
+    # that is both a leaf and a directory in the same path, e.g.
+    # "mission/f6aef04a" and "mission/f6aef04a/task/2e158265" collide.
+    return f"task/{mission_short}/{task_short}"
 
 
 def _prepare_git_branch(
