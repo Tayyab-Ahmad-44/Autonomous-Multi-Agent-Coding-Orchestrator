@@ -1,16 +1,46 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+
+from pydantic import BaseModel, Field
 
 from app.agents.base import AgentContext, AgentInput, AgentOutput, BaseAgent
 from app.core.config import Settings, get_settings
 from app.models import FeatureTaskStatus
 from app.services.codex_service import CodexResult, CodexService
 from app.services.git_service import GitService, GitServiceError
+from app.services.llm_service import LLMService
 from app.services.sandbox_service import SandboxResult, SandboxService
+
+
+logger = logging.getLogger(__name__)
+
+# Codex's CLI stdout has no guaranteed structure (see CodexService/CodexResult), so decisions
+# are extracted with a dedicated LLM call rather than by parsing Codex's own output.
+_MAX_DECISION_DIFF_CHARS = 6000
+
+
+class MissionDecisionEntry(BaseModel):
+    key: str = Field(min_length=1, max_length=100)
+    value: str = Field(min_length=1, max_length=500)
+
+
+class MissionDecisionExtraction(BaseModel):
+    decisions: list[MissionDecisionEntry] = Field(default_factory=list)
+
+
+class DecisionExtractionLLMService(Protocol):
+    async def generate_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        schema_hint: dict[str, Any],
+    ) -> dict[str, Any]:
+        pass
 
 
 class WorkerAgent(BaseAgent):
@@ -22,11 +52,13 @@ class WorkerAgent(BaseAgent):
         codex_service: CodexService | None = None,
         git_service: GitService | None = None,
         settings: Settings | None = None,
+        decision_llm_service: DecisionExtractionLLMService | None = None,
     ) -> None:
         self._sandbox_service = sandbox_service or SandboxService()
         self._settings = settings or get_settings()
         self._codex_service = codex_service or CodexService(settings=self._settings)
         self._git_service = git_service or GitService()
+        self._decision_llm_service = decision_llm_service or LLMService()
 
     async def run(self, context: AgentContext, input: AgentInput) -> AgentOutput:
         if context.repo_path is None:
@@ -47,7 +79,7 @@ class WorkerAgent(BaseAgent):
         validation_contract = _load_validation_contract(context)
         feature_task = input.data
         if self._settings.codex_enabled:
-            return self._run_codex_worker(
+            return await self._run_codex_worker(
                 context=context,
                 repo_path=repo_path,
                 feature_task=feature_task,
@@ -103,7 +135,7 @@ class WorkerAgent(BaseAgent):
             },
         )
 
-    def _run_codex_worker(
+    async def _run_codex_worker(
         self,
         *,
         context: AgentContext,
@@ -112,6 +144,7 @@ class WorkerAgent(BaseAgent):
         validation_contract: dict[str, Any] | None,
     ) -> AgentOutput:
         mission_goal = _load_mission_goal(context)
+        mission_decisions = _load_mission_decisions(context)
         branch_name = _task_branch_name(context)
         git_state = _prepare_git_branch(self._git_service, repo_path, branch_name)
         task_prompt = _codex_task_prompt(
@@ -119,6 +152,7 @@ class WorkerAgent(BaseAgent):
             feature_task=feature_task,
             validation_contract=validation_contract,
             allow_commits=self._settings.codex_allow_commits,
+            mission_decisions=mission_decisions,
         )
         result = self._codex_service.run_codex_task(
             repo_path=str(repo_path),
@@ -151,6 +185,13 @@ class WorkerAgent(BaseAgent):
         task_status = FeatureTaskStatus.completed if result.exit_code == 0 else FeatureTaskStatus.failed
         _mark_feature_task_status(context, task_status)
 
+        if task_status == FeatureTaskStatus.completed and git_has_changes:
+            await self._extract_and_store_decisions(
+                context=context,
+                feature_task=feature_task,
+                diff_text=git_diff or git_status,
+            )
+
         status = "completed" if result.exit_code == 0 else "failed"
         summary = (
             "Codex CLI completed the worker task."
@@ -180,6 +221,39 @@ class WorkerAgent(BaseAgent):
                 "artifact_ids": artifact_ids,
             },
         )
+
+    async def _extract_and_store_decisions(
+        self,
+        *,
+        context: AgentContext,
+        feature_task: dict[str, Any],
+        diff_text: str,
+    ) -> None:
+        from app.services import missions as mission_service
+
+        try:
+            raw_extraction = await self._decision_llm_service.generate_json(
+                system_prompt=_decision_extraction_system_prompt(),
+                user_prompt=_decision_extraction_user_prompt(feature_task, diff_text),
+                schema_hint=_decision_extraction_schema_hint(),
+            )
+            extraction = MissionDecisionExtraction.model_validate(raw_extraction)
+        except Exception:
+            logger.warning(
+                "Mission decision extraction failed for feature_task=%s",
+                context.feature_task_id,
+                exc_info=True,
+            )
+            return
+
+        for entry in extraction.decisions:
+            mission_service.create_mission_decision(
+                context.db,
+                mission_id=context.mission_id,
+                key=entry.key,
+                value=entry.value,
+                source_task_id=context.feature_task_id,
+            )
 
     def _inspect_repository(self, repo_path: Path) -> list[tuple[str, SandboxResult]]:
         commands = _inspection_commands(repo_path)
@@ -228,6 +302,13 @@ def _load_mission_goal(context: AgentContext) -> str:
     if mission is None:
         return ""
     return str(_safe_getattr(mission, "goal", ""))
+
+
+def _load_mission_decisions(context: AgentContext) -> list[dict[str, str]]:
+    from app.services import missions as mission_service
+
+    decisions = mission_service.list_mission_decisions(context.db, context.mission_id)
+    return [{"key": decision.key, "value": decision.value} for decision in decisions]
 
 
 def _store_inspection_artifacts(
@@ -396,9 +477,11 @@ def _codex_task_prompt(
     feature_task: dict[str, Any],
     validation_contract: dict[str, Any] | None,
     allow_commits: bool,
+    mission_decisions: list[dict[str, str]] | None = None,
 ) -> str:
     assertions = _format_assertions(validation_contract)
     required_tests = _format_required_tests(validation_contract)
+    decisions_section = _format_mission_decisions(mission_decisions)
     commit_rule = (
         "Commits are allowed by configuration, but only commit if this task explicitly requires it."
         if allow_commits
@@ -407,7 +490,7 @@ def _codex_task_prompt(
     return f"""You are a coding worker in a controlled multi-agent orchestrator.
 
 Mission goal:
-{mission_goal or "No mission goal was provided."}
+{mission_goal or "No mission goal was provided."}{decisions_section}
 
 Feature task:
 Title: {feature_task.get("title", "Untitled task")}
@@ -427,6 +510,18 @@ Rules:
 - Summarize changes and tests run in your final output.
 - {commit_rule}
 """
+
+
+def _format_mission_decisions(mission_decisions: list[dict[str, str]] | None) -> str:
+    if not mission_decisions:
+        return ""
+    lines = ["\n\nPrior decisions in this mission (stay consistent with these):"]
+    for decision in mission_decisions:
+        key = decision.get("key", "")
+        value = decision.get("value", "")
+        if key or value:
+            lines.append(f"- {key}: {value}")
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def _format_assertions(validation_contract: dict[str, Any] | None) -> str:
@@ -463,6 +558,43 @@ def _format_required_tests(validation_contract: dict[str, Any] | None) -> str:
         command = test.get("command", "")
         lines.append(f"- {name} [{test_type}]: {command}")
     return "\n".join(lines) if lines else "- No required tests were found."
+
+
+def _decision_extraction_system_prompt() -> str:
+    return """Mission decision extractor
+You read a completed coding task's description and code diff, and extract concrete
+implementation decisions that other tasks in the same mission should stay consistent with.
+
+Rules:
+- Only extract decisions that would affect how OTHER tasks in the same mission should be
+  implemented (e.g. auth scheme, error response shape, naming conventions, library choices).
+- Do not invent decisions that are not evidenced by the diff or task description.
+- If nothing decision-worthy happened, return an empty list.
+- Each key must be a short lowercase snake_case slug (e.g. "auth_scheme").
+- Each value must be a short, concrete phrase (e.g. "JWT with refresh tokens").
+- Return only valid JSON."""
+
+
+def _decision_extraction_user_prompt(feature_task: dict[str, Any], diff_text: str) -> str:
+    truncated_diff = diff_text[:_MAX_DECISION_DIFF_CHARS].strip()
+    return f"""Extract key decisions from this completed task.
+
+Task title:
+{feature_task.get("title", "Untitled task")}
+
+Task description:
+{feature_task.get("description", "")}
+
+Code diff or status (may be truncated):
+{truncated_diff or "No diff was captured."}"""
+
+
+def _decision_extraction_schema_hint() -> dict[str, Any]:
+    return {
+        "decisions": [
+            {"key": "string", "value": "string"},
+        ],
+    }
 
 
 def _parse_changed_files(git_status: str) -> list[str]:

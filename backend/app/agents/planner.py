@@ -53,9 +53,15 @@ class PlannerAgent(BaseAgent):
             raise ValueError("PlannerAgent requires mission title and goal in AgentInput.data.")
 
         repo_profile = input.data.get("repo_profile")
+        mission_decisions = input.data.get("mission_decisions")
         raw_plan = await self._llm_service.generate_json(
             system_prompt=_system_prompt(),
-            user_prompt=_user_prompt(title=title, goal=goal, repo_profile=repo_profile),
+            user_prompt=_user_prompt(
+                title=title,
+                goal=goal,
+                repo_profile=repo_profile,
+                mission_decisions=mission_decisions,
+            ),
             schema_hint=_schema_hint(),
         )
         plan = PlannerPlan.model_validate(raw_plan)
@@ -84,15 +90,36 @@ Rules:
 - Return only valid JSON."""
 
 
-def _user_prompt(*, title: str, goal: str, repo_profile: dict | None = None) -> str:
+def _user_prompt(
+    *,
+    title: str,
+    goal: str,
+    repo_profile: dict | None = None,
+    mission_decisions: list | None = None,
+) -> str:
     repo_section = _format_repo_profile(repo_profile)
+    decisions_section = _format_mission_decisions(mission_decisions)
     return f"""Plan this mission.
 
 Mission title:
 {title}
 
 Mission goal:
-{goal}{repo_section}"""
+{goal}{repo_section}{decisions_section}"""
+
+
+def _format_mission_decisions(mission_decisions: list | None) -> str:
+    if not mission_decisions:
+        return ""
+    lines = ["\n\nPrior decisions in this mission (stay consistent with these):"]
+    for decision in mission_decisions:
+        if not isinstance(decision, dict):
+            continue
+        key = decision.get("key", "")
+        value = decision.get("value", "")
+        if key or value:
+            lines.append(f"- {key}: {value}")
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def _format_repo_profile(profile: dict | None) -> str:

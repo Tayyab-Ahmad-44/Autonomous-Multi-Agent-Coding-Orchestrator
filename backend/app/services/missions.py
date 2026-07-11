@@ -22,6 +22,7 @@ from app.models import (
     FeatureTaskStatus,
     FeatureTaskType,
     Milestone,
+    MissionDecision,
     MissionEvent,
     MilestoneStatus,
     Mission,
@@ -549,12 +550,14 @@ async def run_planning_for_mission(
             except Exception:
                 repo_profile = None
 
+    mission_decisions = list_mission_decisions(db, mission_id)
     agent_input = AgentInput(
         instructions="Create an MVP implementation plan for this mission.",
         data={
             "title": mission.title,
             "goal": mission.goal,
             "repo_profile": _repo_profile_to_dict(repo_profile),
+            "mission_decisions": _mission_decisions_to_dicts(mission_decisions),
         },
     )
     agent_run = create_agent_run(
@@ -621,6 +624,10 @@ def _repo_profile_to_dict(profile: RepoProfile | None) -> dict | None:
         "has_ci": profile.has_ci,
         "readme_summary": profile.readme_summary,
     }
+
+
+def _mission_decisions_to_dicts(decisions: list[MissionDecision]) -> list[JsonObject]:
+    return [{"key": decision.key, "value": decision.value} for decision in decisions]
 
 
 def _persist_plan(db: Session, *, mission_id: UUID, plan: JsonObject) -> None:
@@ -1506,6 +1513,38 @@ def create_validation_report(
         },
     )
     return report
+
+
+def list_mission_decisions(db: Session, mission_id: UUID) -> list[MissionDecision]:
+    # Returns every decision ever recorded for the mission, unfiltered. Fine for an MVP mission
+    # size; a long-running mission accumulating many decisions would need summarization or
+    # capping here before injecting them into prompts.
+    statement = (
+        select(MissionDecision)
+        .where(MissionDecision.mission_id == mission_id)
+        .order_by(MissionDecision.created_at.asc())
+    )
+    return list(db.scalars(statement).all())
+
+
+def create_mission_decision(
+    db: Session,
+    *,
+    mission_id: UUID,
+    key: str,
+    value: str,
+    source_task_id: UUID | None = None,
+) -> MissionDecision:
+    decision = MissionDecision(
+        mission_id=mission_id,
+        source_task_id=source_task_id,
+        key=key,
+        value=value,
+    )
+    db.add(decision)
+    db.commit()
+    db.refresh(decision)
+    return decision
 
 
 def create_artifact(
