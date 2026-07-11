@@ -86,6 +86,48 @@ async def run_mission_tick(
     )
 
 
+_PAUSE_STEPS = {
+    "wait_for_approval",
+    "waiting_for_active_agent_run",
+    "worker_queued",
+    "worker_retry_queued",
+    "task_already_queued",
+    "no_pending_feature_task",
+    "agent_retry_limit_exceeded",
+    "validation_loop_limit_exceeded",
+    "complete_mission",
+    "stop",
+}
+
+
+async def run_mission_until_blocked(
+    db: Session,
+    mission_id: UUID,
+    *,
+    validator_agent: ValidatorAgent | None = None,
+    fix_planner_agent: FixPlannerAgent | None = None,
+    max_iterations: int = 50,
+) -> MissionGraphState:
+    """Repeatedly tick the mission graph until it hits a state that requires
+    waiting on something external (an in-flight Celery job, human approval, or
+    mission completion/failure). This is what makes mission execution
+    autonomous after approval instead of requiring a manual "tick" per step.
+    """
+    state: MissionGraphState | None = None
+    for _ in range(max_iterations):
+        state = await run_mission_tick(
+            db,
+            mission_id,
+            validator_agent=validator_agent,
+            fix_planner_agent=fix_planner_agent,
+        )
+        if state.get("next_step") in _PAUSE_STEPS:
+            break
+    if state is None:
+        raise mission_service.MissionNotFoundError(f"Mission not found: {mission_id}")
+    return state
+
+
 def build_mission_graph():
     graph = StateGraph(MissionGraphState)
 

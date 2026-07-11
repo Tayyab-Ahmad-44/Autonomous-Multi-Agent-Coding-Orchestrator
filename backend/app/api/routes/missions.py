@@ -7,7 +7,11 @@ from fastapi.responses import StreamingResponse
 from app.api.deps import CurrentUser, DbSession
 from app.agents import FixPlannerAgent, PlannerAgent, SpecAgent, ValidatorAgent
 from app.models import Mission, User
-from app.orchestration.mission_graph import run_mission_orchestrator, run_mission_tick
+from app.orchestration.mission_graph import (
+    run_mission_orchestrator,
+    run_mission_tick,
+    run_mission_until_blocked,
+)
 from app.schemas import (
     FeatureTaskRead,
     MilestoneRead,
@@ -358,16 +362,28 @@ async def tick_mission(
 
 
 @router.post("/{mission_id}/approve-plan", response_model=MissionDetailRead)
-def approve_plan(mission_id: UUID, current_user: CurrentUser, db: DbSession) -> MissionDetailRead:
+async def approve_plan(
+    mission_id: UUID,
+    current_user: CurrentUser,
+    db: DbSession,
+    validator_agent: ValidatorAgent = Depends(get_validator_agent),
+    fix_planner_agent: FixPlannerAgent = Depends(get_fix_planner_agent),
+) -> MissionDetailRead:
     _require_owned_mission(db, mission_id, current_user)
     try:
-        mission = mission_service.approve_plan(db, mission_id)
+        mission_service.approve_plan(db, mission_id)
+        state = await run_mission_until_blocked(
+            db,
+            mission_id,
+            validator_agent=validator_agent,
+            fix_planner_agent=fix_planner_agent,
+        )
     except mission_service.MissionNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mission not found") from None
     except mission_service.MissionNotReadyError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    return _to_mission_detail(mission)
+    return _to_mission_detail(state["mission"])
 
 
 @router.post("/{mission_id}/reject-plan", response_model=MissionDetailRead)

@@ -351,15 +351,13 @@ class MissionOrchestratorEndpointTests(TestCase):
         self.assertEqual(waiting.json()["status"], MissionStatus.waiting_for_approval.value)
 
         self._set_repository(mission["id"])
-        approved = self.client.post(f"/missions/{mission['id']}/approve-plan")
+        with patch("app.orchestration.mission_graph.run_agent_task.delay") as delay:
+            approved = self.client.post(f"/missions/{mission['id']}/approve-plan")
+
         self.assertEqual(approved.status_code, 200)
         self.assertEqual(approved.json()["status"], MissionStatus.running.value)
-
-        with patch("app.orchestration.mission_graph.run_agent_task.delay") as delay:
-            dispatched = self.client.post(f"/missions/{mission['id']}/tick")
-
-        self.assertEqual(dispatched.status_code, 200)
-        self.assertEqual(dispatched.json()["feature_tasks"][0]["status"], FeatureTaskStatus.running.value)
+        # Approval auto-dispatches the first feature task straight away.
+        self.assertEqual(approved.json()["feature_tasks"][0]["status"], FeatureTaskStatus.running.value)
         delay.assert_called_once()
 
         with self.session_local() as db:
@@ -398,6 +396,8 @@ class MissionOrchestratorEndpointTests(TestCase):
     def test_tick_does_not_duplicate_worker_run_for_queued_task(self) -> None:
         app.dependency_overrides[get_planner_agent] = lambda: SingleTaskPlanner()
         app.dependency_overrides[get_spec_agent] = lambda: PassingTickSpec()
+        # Approval already dispatched the one feature task; ticking again
+        # should not queue a duplicate worker run while it's still active.
         mission = self._create_planned_approved_single_task_mission()
 
         with patch("app.orchestration.mission_graph.run_agent_task.delay") as delay:
@@ -406,7 +406,7 @@ class MissionOrchestratorEndpointTests(TestCase):
 
         self.assertEqual(first_tick.status_code, 200)
         self.assertEqual(second_tick.status_code, 200)
-        delay.assert_called_once()
+        delay.assert_not_called()
         with self.session_local() as db:
             agent_runs = db.scalars(select(AgentRun)).all()
 
@@ -417,10 +417,12 @@ class MissionOrchestratorEndpointTests(TestCase):
     def test_tick_retries_failed_task_then_fails_when_retry_limit_is_exceeded(self) -> None:
         app.dependency_overrides[get_planner_agent] = lambda: SingleTaskPlanner()
         app.dependency_overrides[get_spec_agent] = lambda: PassingTickSpec()
+        # Approval already dispatched the first attempt; fail that run
+        # instead of manually queuing a redundant second one.
         mission = self._create_planned_approved_single_task_mission()
         with self.session_local() as db:
             task = db.scalars(select(FeatureTask)).one()
-            first_run = mission_service.create_worker_agent_run_for_feature_task(db, task)
+            first_run = db.scalars(select(AgentRun).where(AgentRun.agent_type == "worker")).one()
             mission_service.mark_agent_run_running(db, first_run)
             mission_service.complete_agent_run(db, first_run, error="worker failed")
             mission_service.set_feature_task_status(db, task, FeatureTaskStatus.failed)
@@ -465,6 +467,13 @@ class MissionOrchestratorEndpointTests(TestCase):
         mission = self._create_planned_approved_single_task_mission()
         with self.session_local() as db:
             task = db.scalars(select(FeatureTask)).one()
+            worker_run = db.scalars(select(AgentRun).where(AgentRun.agent_type == "worker")).one()
+            mission_service.mark_agent_run_running(db, worker_run)
+            mission_service.complete_agent_run(
+                db,
+                worker_run,
+                output={"status": "completed", "summary": "Worker completed.", "data": {}},
+            )
             mission_service.set_feature_task_status(db, task, FeatureTaskStatus.completed)
 
         with patch.dict(os.environ, {"MAX_VALIDATION_LOOPS": "0"}):
@@ -487,14 +496,14 @@ class MissionOrchestratorEndpointTests(TestCase):
     def test_tick_can_complete_end_to_end_with_stub_worker(self) -> None:
         app.dependency_overrides[get_planner_agent] = lambda: SingleTaskPlanner()
         app.dependency_overrides[get_spec_agent] = lambda: PassingTickSpec()
+        # Approval already dispatched the one feature task's worker run; run
+        # the real (stub) worker task for it directly.
         mission = self._create_planned_approved_single_task_mission()
-
-        with patch("app.orchestration.mission_graph.run_agent_task.delay") as delay:
-            worker_tick = self.client.post(f"/missions/{mission['id']}/tick")
-        run_agent_task(delay.call_args.args[0])
+        with self.session_local() as db:
+            worker_run = db.scalars(select(AgentRun).where(AgentRun.agent_type == "worker")).one()
+        run_agent_task(str(worker_run.id))
         completed_tick = self.client.post(f"/missions/{mission['id']}/tick")
 
-        self.assertEqual(worker_tick.status_code, 200)
         self.assertEqual(completed_tick.status_code, 200)
         self.assertEqual(completed_tick.json()["status"], MissionStatus.completed.value)
         with self.session_local() as db:
@@ -519,10 +528,18 @@ class MissionOrchestratorEndpointTests(TestCase):
         self.client.post(f"/missions/{mission['id']}/tick")
         self.client.post(f"/missions/{mission['id']}/tick")
         self._set_repository(mission["id"])
-        self.client.post(f"/missions/{mission['id']}/approve-plan")
+        with patch("app.orchestration.mission_graph.run_agent_task.delay"):
+            self.client.post(f"/missions/{mission['id']}/approve-plan")
 
         with self.session_local() as db:
             feature_task = db.scalars(select(FeatureTask)).one()
+            worker_run = db.scalars(select(AgentRun).where(AgentRun.agent_type == "worker")).one()
+            mission_service.mark_agent_run_running(db, worker_run)
+            mission_service.complete_agent_run(
+                db,
+                worker_run,
+                output={"status": "completed", "summary": "Worker completed.", "data": {}},
+            )
             mission_service.set_feature_task_status(db, feature_task, FeatureTaskStatus.completed)
 
         response = self.client.post(f"/missions/{mission['id']}/tick")
@@ -545,9 +562,11 @@ class MissionOrchestratorEndpointTests(TestCase):
             events = db.scalars(select(MissionEvent)).all()
 
         self.assertFalse(report.passed)
+        # Approval now auto-dispatches a worker run before we ever manually
+        # complete the feature task below, so it shows up in the sequence.
         self.assertEqual(
             [run.agent_type for run in agent_runs],
-            ["planner", "spec", "validator", "fix_planner"],
+            ["planner", "spec", "worker", "validator", "fix_planner"],
         )
         event_types = {event.event_type for event in events}
         self.assertIn("validation_failed", event_types)
@@ -657,5 +676,9 @@ class MissionOrchestratorEndpointTests(TestCase):
         self.client.post(f"/missions/{mission['id']}/tick")
         self.client.post(f"/missions/{mission['id']}/tick")
         self._set_repository(mission["id"])
-        self.client.post(f"/missions/{mission['id']}/approve-plan")
+        # Approval now auto-dispatches the first feature task; keep that off
+        # the real Celery broker in tests the same way explicit dispatch
+        # assertions elsewhere in this file do.
+        with patch("app.orchestration.mission_graph.run_agent_task.delay"):
+            self.client.post(f"/missions/{mission['id']}/approve-plan")
         return mission

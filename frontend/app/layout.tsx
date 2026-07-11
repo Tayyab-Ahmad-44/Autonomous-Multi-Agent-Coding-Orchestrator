@@ -29,7 +29,7 @@ export default function RootLayout({
                     Missions
                   </Link>
                   <Link
-                    className="rounded-md bg-accent px-3 py-2 font-medium text-white hover:bg-[#17616f]"
+                    className="rounded-md bg-accent px-3 py-2 font-medium text-white hover:bg-accentDark"
                     href="/missions/new"
                   >
                     New mission

@@ -9,11 +9,11 @@ import {
   cloneRepository,
   createMission,
   createRepo,
-  generatePlan,
-  generateValidationContract,
   listRepos,
+  orchestrateMission,
 } from "../../../lib/api";
 import { RequireAuth } from "../../../components/RequireAuth";
+import { ActionRow, Btn, ErrorBanner, Spinner } from "../../../components/ui";
 
 // ── Step indicator ────────────────────────────────────────────────────────────
 
@@ -52,41 +52,6 @@ function StepIndicator({ current }: { current: number }) {
         </div>
       ))}
     </div>
-  );
-}
-
-// ── Shared primitives ─────────────────────────────────────────────────────────
-
-function ErrorBanner({ message }: { message: string }) {
-  return (
-    <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-      {message}
-    </p>
-  );
-}
-
-function Btn({
-  children,
-  disabled,
-  type = "button",
-  variant = "primary",
-  onClick,
-}: {
-  children: React.ReactNode;
-  disabled?: boolean;
-  type?: "button" | "submit";
-  variant?: "primary" | "ghost";
-  onClick?: () => void;
-}) {
-  const base = "rounded-md px-4 py-2 text-sm font-medium transition-opacity disabled:opacity-50";
-  const styles =
-    variant === "primary"
-      ? `${base} bg-accent text-white`
-      : `${base} border border-line bg-white text-ink hover:bg-panel`;
-  return (
-    <button className={styles} disabled={disabled} type={type} onClick={onClick}>
-      {children}
-    </button>
   );
 }
 
@@ -361,23 +326,6 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
   );
 }
 
-function Spinner() {
-  return (
-    <svg
-      className="h-8 w-8 animate-spin text-accent"
-      fill="none"
-      viewBox="0 0 24 24"
-    >
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-      <path
-        className="opacity-75"
-        fill="currentColor"
-        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
-      />
-    </svg>
-  );
-}
-
 // ── Step 4: Next steps ────────────────────────────────────────────────────────
 
 function NextStepsStep({
@@ -388,32 +336,18 @@ function NextStepsStep({
   cloneResult: RepositoryCloneResponse;
 }) {
   const router = useRouter();
-  const [planStatus, setPlanStatus] = useState<"idle" | "running" | "done" | "error">("idle");
-  const [contractStatus, setContractStatus] = useState<"idle" | "running" | "done" | "error">("idle");
-  const [planError, setPlanError] = useState<string | null>(null);
-  const [contractError, setContractError] = useState<string | null>(null);
+  const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
 
-  async function onGeneratePlan() {
-    setPlanStatus("running");
-    setPlanError(null);
+  async function onAnalyze() {
+    setStatus("running");
+    setError(null);
     try {
-      await generatePlan(mission.id);
-      setPlanStatus("done");
+      await orchestrateMission(mission.id);
+      setStatus("done");
     } catch (err) {
-      setPlanError(err instanceof Error ? err.message : "Plan generation failed");
-      setPlanStatus("error");
-    }
-  }
-
-  async function onGenerateContract() {
-    setContractStatus("running");
-    setContractError(null);
-    try {
-      await generateValidationContract(mission.id);
-      setContractStatus("done");
-    } catch (err) {
-      setContractError(err instanceof Error ? err.message : "Contract generation failed");
-      setContractStatus("error");
+      setError(err instanceof Error ? err.message : "Repo analysis failed");
+      setStatus("error");
     }
   }
 
@@ -430,73 +364,22 @@ function NextStepsStep({
       </div>
 
       <p className="text-sm text-slate-600">
-        Your mission is set up. Start the orchestration process or go straight to the mission view.
+        The orchestrator will read the repository, then generate a milestone plan and a validation
+        contract it can be held to.
       </p>
 
-      <div className="space-y-3">
-        <ActionRow
-          label="Generate plan"
-          description="Run the planner agent to break the goal into milestones and tasks."
-          status={planStatus}
-          error={planError}
-          onClick={onGeneratePlan}
-        />
-        <ActionRow
-          label="Generate validation contract"
-          description="Define the assertions and tests the code must satisfy."
-          status={contractStatus}
-          error={contractError}
-          onClick={onGenerateContract}
-        />
-      </div>
+      <ActionRow
+        label="Analyze repo & generate plan"
+        description="Looks at the repository, breaks the goal into milestones and tasks, and defines the tests the result must pass."
+        status={status}
+        error={error}
+        onClick={onAnalyze}
+      />
 
       <div className="flex justify-end border-t border-line pt-4">
-        <Btn onClick={() => router.push(`/missions/${mission.id}`)}>
+        <Btn disabled={status !== "done"} onClick={() => router.push(`/missions/${mission.id}`)}>
           Go to mission →
         </Btn>
-      </div>
-    </div>
-  );
-}
-
-function ActionRow({
-  label,
-  description,
-  status,
-  error,
-  onClick,
-}: {
-  label: string;
-  description: string;
-  status: "idle" | "running" | "done" | "error";
-  error: string | null;
-  onClick: () => void;
-}) {
-  const indicator =
-    status === "done" ? (
-      <span className="text-xs font-medium text-green-700 bg-green-50 border border-green-200 rounded px-2 py-0.5">Done</span>
-    ) : status === "running" ? (
-      <span className="text-xs text-slate-500">Running…</span>
-    ) : null;
-
-  return (
-    <div className="rounded-md border border-line bg-white p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="space-y-0.5">
-          <p className="text-sm font-medium text-ink">{label}</p>
-          <p className="text-xs text-slate-500">{description}</p>
-          {status === "error" && error && <p className="text-xs text-red-600 mt-1">{error}</p>}
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {indicator}
-          <Btn
-            variant={status === "done" ? "ghost" : "primary"}
-            disabled={status === "running"}
-            onClick={onClick}
-          >
-            {status === "done" ? "Re-run" : label}
-          </Btn>
-        </div>
       </div>
     </div>
   );

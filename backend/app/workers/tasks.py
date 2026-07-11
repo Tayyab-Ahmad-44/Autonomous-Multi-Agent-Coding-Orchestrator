@@ -10,6 +10,21 @@ from app.services import missions as mission_service
 from app.workers.celery_app import celery_app
 
 
+def _advance_mission(db, mission_id) -> None:
+    from app.orchestration.mission_graph import run_mission_until_blocked
+
+    try:
+        asyncio.run(run_mission_until_blocked(db, mission_id))
+    except Exception as exc:
+        mission_service.log_mission_event(
+            db,
+            mission_id=mission_id,
+            event_type="orchestration_error",
+            message=f"Auto-advance failed: {exc}",
+            payload={},
+        )
+
+
 @celery_app.task(name="app.workers.tasks.run_agent_task")
 def run_agent_task(agent_run_id: str) -> dict[str, str]:
     db = get_session_local()()
@@ -51,9 +66,11 @@ def run_agent_task(agent_run_id: str) -> dict[str, str]:
                 output=output_payload,
                 error=output_error,
             )
+            _advance_mission(db, agent_run.mission_id)
             return {"agent_run_id": agent_run_id, "status": output.status}
         except Exception as exc:
             mission_service.complete_agent_run(db, agent_run, error=str(exc))
+            _advance_mission(db, agent_run.mission_id)
             return {"agent_run_id": agent_run_id, "status": "failed"}
     finally:
         db.close()

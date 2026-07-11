@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from unittest import TestCase
+from unittest.mock import patch
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -63,17 +64,21 @@ class ApprovalFlowEndpointTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("validation contract", response.json()["detail"])
 
-    def test_approval_changes_mission_status_to_running(self) -> None:
+    def test_approval_changes_mission_status_to_running_and_starts_the_first_task(self) -> None:
         mission = self._create_planned_mission(include_contract=True)
 
-        response = self.client.post(f"/missions/{mission['id']}/approve-plan")
+        with patch("app.orchestration.mission_graph.run_agent_task.delay") as delay:
+            response = self.client.post(f"/missions/{mission['id']}/approve-plan")
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["status"], MissionStatus.running.value)
         self.assertEqual(body["current_milestone_id"], body["milestones"][0]["id"])
         self.assertEqual(body["milestones"][0]["status"], MilestoneStatus.running.value)
-        self.assertEqual(body["feature_tasks"][0]["status"], FeatureTaskStatus.pending.value)
+        # Approval now kicks off the mission autonomously: the first feature
+        # task is dispatched to a worker agent immediately, not left pending.
+        self.assertEqual(body["feature_tasks"][0]["status"], FeatureTaskStatus.running.value)
+        delay.assert_called_once()
 
     def test_reject_plan_records_feedback_and_resets_when_requested(self) -> None:
         mission = self._create_planned_mission(include_contract=True)

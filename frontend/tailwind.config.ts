@@ -9,6 +9,7 @@ const config: Config = {
         line: "#d7dde2",
         panel: "#f6f8fa",
         accent: "#1f7a8c",
+        accentDark: "#17616f",
       },
     },
   },

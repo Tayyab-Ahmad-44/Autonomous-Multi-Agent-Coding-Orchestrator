@@ -212,6 +212,10 @@ export function generatePlan(missionId: string) {
   return apiFetch<MissionDetail>(`/missions/${missionId}/plan`, { method: "POST" });
 }
 
+export function orchestrateMission(missionId: string) {
+  return apiFetch<MissionDetail>(`/missions/${missionId}/orchestrate`, { method: "POST" });
+}
+
 export function generateValidationContract(missionId: string) {
   return apiFetch<ValidationContract>(`/missions/${missionId}/validation-contract`, {
     method: "POST",

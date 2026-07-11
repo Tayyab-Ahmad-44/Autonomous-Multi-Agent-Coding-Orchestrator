@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   API_BASE_URL,
   FeatureTask,
@@ -9,17 +9,18 @@ import {
   Milestone,
   MissionDetail,
   MissionEvent,
+  approvePlan,
   postMissionAction,
+  rejectPlan,
   ValidationReport,
 } from "../../../lib/api";
 import { RequireAuth } from "../../../components/RequireAuth";
+import { Btn, ErrorBanner, StatusBadge } from "../../../components/ui";
 
-const actions = [
-  ["Generate plan", "plan"],
-  ["Generate validation contract", "validation-contract"],
-  ["Approve plan", "approve-plan"],
-  ["Tick mission", "tick"],
-  ["Validate mission", "validate"],
+const ADVANCED_ACTIONS = [
+  ["Re-run plan", "plan"],
+  ["Regenerate validation contract", "validation-contract"],
+  ["Validate now", "validate"],
 ] as const;
 
 export default function MissionDetailPage() {
@@ -37,6 +38,8 @@ function MissionDetailPageContent() {
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [liveState, setLiveState] = useState("connecting");
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const [rejectFeedback, setRejectFeedback] = useState("");
 
   const refresh = useCallback(async () => {
     const latest = await getMission(missionId);
@@ -58,11 +61,11 @@ function MissionDetailPageContent() {
     return () => source.close();
   }, [missionId]);
 
-  async function runAction(action: string) {
+  async function runAction(action: string, fn: () => Promise<unknown>) {
     setError(null);
     setBusyAction(action);
     try {
-      await postMissionAction<unknown>(missionId, action);
+      await fn();
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : `Action failed: ${action}`);
@@ -71,11 +74,27 @@ function MissionDetailPageContent() {
     }
   }
 
+  async function onReject(event: FormEvent) {
+    event.preventDefault();
+    await runAction("reject-plan", () => rejectPlan(missionId, rejectFeedback, true));
+    setRejectOpen(false);
+    setRejectFeedback("");
+  }
+
   const tasksByMilestone = useMemo(() => groupTasksByMilestone(mission?.feature_tasks ?? []), [mission]);
 
   if (!mission) {
-    return <p className="text-sm text-slate-600">Loading mission...</p>;
+    return (
+      <div className="flex items-center gap-2 text-sm text-slate-600">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+        Loading mission…
+      </div>
+    );
   }
+
+  const latestFailureEvent = mission.status === "failed"
+    ? [...mission.events].reverse().find((e) => e.event_type.includes("failed") || e.event_type.includes("error"))
+    : null;
 
   return (
     <section className="space-y-5">
@@ -83,30 +102,73 @@ function MissionDetailPageContent() {
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-semibold tracking-normal">{mission.title}</h1>
-            <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-700 ring-1 ring-line">
-              {mission.status}
-            </span>
+            <StatusBadge value={mission.status} />
           </div>
           <p className="mt-2 max-w-3xl text-sm text-slate-600">{mission.goal}</p>
         </div>
         <span className="rounded-md bg-white px-2 py-1 text-xs text-slate-600 ring-1 ring-line">{liveState}</span>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        {actions.map(([label, action]) => (
-          <button
-            className="rounded-md border border-line bg-white px-3 py-2 text-sm font-medium hover:border-accent disabled:opacity-60"
-            disabled={busyAction !== null}
-            key={action}
-            onClick={() => runAction(action)}
-            type="button"
-          >
-            {busyAction === action ? "Working..." : label}
-          </button>
-        ))}
-      </div>
+      {error ? <ErrorBanner message={error} /> : null}
 
-      {error ? <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
+      {mission.status === "waiting_for_approval" && (
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-md border border-accent/30 bg-accent/5 p-4">
+          <div>
+            <p className="text-sm font-medium text-ink">Plan ready for review</p>
+            <p className="mt-0.5 text-xs text-slate-600">
+              Once approved, the orchestrator will work through every milestone autonomously — dispatching Codex,
+              validating results, and retrying fixes — with no further clicks needed.
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Btn variant="ghost" disabled={busyAction !== null} onClick={() => setRejectOpen((v) => !v)}>
+              Reject
+            </Btn>
+            <Btn
+              disabled={busyAction !== null}
+              onClick={() => runAction("approve-plan", () => approvePlan(missionId))}
+            >
+              {busyAction === "approve-plan" ? "Starting…" : "Approve & Start"}
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {rejectOpen && (
+        <form onSubmit={onReject} className="space-y-3 rounded-md border border-line bg-white p-4">
+          <label className="block">
+            <span className="text-sm font-medium">What should change about the plan?</span>
+            <textarea
+              className="mt-1 min-h-20 w-full rounded-md border border-line px-3 py-2 text-sm outline-none focus:border-accent"
+              value={rejectFeedback}
+              onChange={(e) => setRejectFeedback(e.target.value)}
+              placeholder="e.g. Split milestone 2 into smaller steps"
+            />
+          </label>
+          <div className="flex justify-end gap-2">
+            <Btn variant="ghost" onClick={() => setRejectOpen(false)}>
+              Cancel
+            </Btn>
+            <Btn type="submit" disabled={busyAction !== null}>
+              Send back for re-planning
+            </Btn>
+          </div>
+        </form>
+      )}
+
+      {mission.status === "failed" && (
+        <div className="space-y-3 rounded-md border border-red-200 bg-red-50 p-4">
+          <div>
+            <p className="text-sm font-medium text-red-800">Mission paused — needs your input</p>
+            <p className="mt-0.5 text-xs text-red-700">
+              {latestFailureEvent?.message ?? "The orchestrator hit a limit it couldn't resolve on its own."}
+            </p>
+          </div>
+          <Btn disabled={busyAction !== null} onClick={() => runAction("tick", () => postMissionAction(missionId, "tick"))}>
+            {busyAction === "tick" ? "Resuming…" : "Resume"}
+          </Btn>
+        </div>
+      )}
 
       <div className="grid gap-5 lg:grid-cols-[1.2fr_0.8fr]">
         <section className="space-y-3">
@@ -127,7 +189,40 @@ function MissionDetailPageContent() {
           <ValidationReportsPanel reports={mission.validation_reports} />
         </section>
       </div>
+
+      <AdvancedActions missionId={missionId} busyAction={busyAction} runAction={runAction} />
     </section>
+  );
+}
+
+function AdvancedActions({
+  missionId,
+  busyAction,
+  runAction,
+}: {
+  missionId: string;
+  busyAction: string | null;
+  runAction: (action: string, fn: () => Promise<unknown>) => Promise<void>;
+}) {
+  return (
+    <details className="rounded-md border border-line bg-white">
+      <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-slate-600">
+        Advanced
+      </summary>
+      <div className="flex flex-wrap gap-2 border-t border-line p-4">
+        {ADVANCED_ACTIONS.map(([label, action]) => (
+          <Btn
+            key={action}
+            variant="ghost"
+            size="sm"
+            disabled={busyAction !== null}
+            onClick={() => runAction(action, () => postMissionAction(missionId, action))}
+          >
+            {busyAction === action ? "Working…" : label}
+          </Btn>
+        ))}
+      </div>
+    </details>
   );
 }
 
@@ -139,7 +234,7 @@ function MilestonePanel({ milestone, tasks }: { milestone: Milestone; tasks: Fea
           <h3 className="font-medium">{milestone.order_index}. {milestone.name}</h3>
           <p className="mt-1 text-sm text-slate-600">{milestone.description}</p>
         </div>
-        <StatusLabel value={milestone.status} />
+        <StatusBadge value={milestone.status} />
       </div>
       <div className="divide-y divide-line">
         {tasks.length === 0 ? <EmptyState text="No tasks in this milestone." /> : null}
@@ -153,7 +248,7 @@ function MilestonePanel({ milestone, tasks }: { milestone: Milestone; tasks: Fea
                 </div>
                 <p className="mt-1 text-sm text-slate-600">{task.description}</p>
               </div>
-              <StatusLabel value={task.status} />
+              <StatusBadge value={task.status} />
             </div>
           </div>
         ))}
@@ -214,7 +309,7 @@ function ValidationReportsPanel({ reports }: { reports: ValidationReport[] }) {
           <div className="rounded-md border border-line p-3" key={report.id}>
             <div className="flex items-center justify-between gap-3">
               <span className="text-sm font-medium">{report.summary}</span>
-              <StatusLabel value={report.passed ? "passed" : "failed"} />
+              <StatusBadge value={report.passed ? "passed" : "failed"} />
             </div>
             {report.issues.length ? <JsonBlock title="Issues" value={report.issues} /> : null}
           </div>
@@ -237,10 +332,6 @@ function JsonBlock({ title, value }: { title: string; value: unknown }) {
 
 function EmptyState({ text }: { text: string }) {
   return <p className="px-4 py-3 text-sm text-slate-500">{text}</p>;
-}
-
-function StatusLabel({ value }: { value: string }) {
-  return <span className="shrink-0 rounded-md bg-panel px-2 py-1 text-xs font-medium text-slate-700">{value}</span>;
 }
 
 function groupTasksByMilestone(tasks: FeatureTask[]) {

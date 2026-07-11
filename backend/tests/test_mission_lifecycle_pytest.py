@@ -193,16 +193,26 @@ def test_mission_lifecycle_failed_validation_fix_then_completion(
     )
     assert repository.status_code == 201
 
-    approved = client.post(f"/missions/{mission_id}/approve-plan")
+    # Approval auto-dispatches the first feature task; capture its AgentRun id
+    # instead of driving the mission forward with manual ticks.
+    with patch("app.orchestration.mission_graph.run_agent_task.delay") as delay:
+        approved = client.post(f"/missions/{mission_id}/approve-plan")
     assert approved.status_code == 200
     assert approved.json()["status"] == MissionStatus.running.value
     assert approved.json()["milestones"][0]["status"] == "running"
+    delay.assert_called_once()
+    first_task_run_id = str(delay.call_args.args[0])
 
-    first_task_run_id = _tick_and_capture_worker_run(client, mission_id)
-    first_worker = run_agent_task(first_task_run_id)
+    # Running the worker task auto-advances the mission afterward: it runs
+    # validators, finds the failure, creates a fix task, and dispatches it -
+    # all without any manual tick.
+    with patch("app.orchestration.mission_graph.run_agent_task.delay") as delay:
+        first_worker = run_agent_task(first_task_run_id)
     assert first_worker["status"] == "completed"
+    delay.assert_called_once()
+    fix_task_run_id = str(delay.call_args.args[0])
 
-    failed_body = _tick_until_validation_report_count(client, mission_id, expected_count=1)
+    failed_body = client.get(f"/missions/{mission_id}").json()
     assert failed_body["status"] == MissionStatus.running.value
     assert failed_body["validation_reports"][0]["passed"] is False
 
@@ -212,25 +222,32 @@ def test_mission_lifecycle_failed_validation_fix_then_completion(
         if task["task_type"] == FeatureTaskType.fix.value
     ]
     assert len(fix_tasks) == 1
-    assert fix_tasks[0]["status"] == "pending"
+    assert fix_tasks[0]["status"] == "running"
     assert fix_tasks[0]["assigned_agent_type"] == "worker"
 
-    fix_task_run_id = _tick_and_capture_worker_run(client, mission_id)
-    fix_worker = run_agent_task(fix_task_run_id)
-    assert fix_worker["status"] == "completed"
     (lifecycle_context.repo_path / "validation_marker.txt").write_text("ok", encoding="utf-8")
 
-    first_pass_body = _tick_until_validation_report_count(client, mission_id, expected_count=2)
+    # Completing the fix task auto-advances again: validation passes, the
+    # first milestone completes, and the second milestone's task is queued.
+    with patch("app.orchestration.mission_graph.run_agent_task.delay") as delay:
+        fix_worker = run_agent_task(fix_task_run_id)
+    assert fix_worker["status"] == "completed"
+    delay.assert_called_once()
+    second_task_run_id = str(delay.call_args.args[0])
+
+    first_pass_body = client.get(f"/missions/{mission_id}").json()
     assert first_pass_body["validation_reports"][0]["passed"] is True
     assert first_pass_body["milestones"][0]["status"] == "completed"
     assert first_pass_body["milestones"][1]["status"] == "running"
     assert first_pass_body["status"] == MissionStatus.running.value
 
-    second_task_run_id = _tick_and_capture_worker_run(client, mission_id)
-    second_worker = run_agent_task(second_task_run_id)
+    # Completing the second milestone's task auto-advances the mission all
+    # the way to completion - no further ticks needed.
+    with patch("app.orchestration.mission_graph.run_agent_task.delay"):
+        second_worker = run_agent_task(second_task_run_id)
     assert second_worker["status"] == "completed"
 
-    completed_body = _tick_until_validation_report_count(client, mission_id, expected_count=3)
+    completed_body = client.get(f"/missions/{mission_id}").json()
     assert completed_body["status"] == MissionStatus.completed.value
     assert all(milestone["status"] == "completed" for milestone in completed_body["milestones"])
     assert completed_body["validation_reports"][0]["passed"] is True
@@ -252,36 +269,3 @@ def test_mission_lifecycle_failed_validation_fix_then_completion(
     ]
     assert all(run.status == AgentRunStatus.completed for run in agent_runs)
     assert all(task.status.value == "completed" for task in feature_tasks)
-
-
-def _tick_and_capture_worker_run(client: TestClient, mission_id: str) -> str:
-    with patch("app.orchestration.mission_graph.run_agent_task.delay") as delay:
-        ticked = client.post(f"/missions/{mission_id}/tick")
-
-    assert ticked.status_code == 200
-    delay.assert_called_once()
-    return str(delay.call_args.args[0])
-
-
-def _tick_until_validation_report_count(
-    client: TestClient,
-    mission_id: str,
-    *,
-    expected_count: int,
-    max_ticks: int = 3,
-) -> dict:
-    detail_body = None
-    for _ in range(max_ticks):
-        with patch("app.orchestration.mission_graph.run_agent_task.delay") as delay:
-            ticked = client.post(f"/missions/{mission_id}/tick")
-        assert ticked.status_code == 200
-        if delay.called:
-            pytest.fail(f"Expected validation/advance tick, but worker was queued: {ticked.json()}")
-
-        detail = client.get(f"/missions/{mission_id}")
-        assert detail.status_code == 200
-        detail_body = detail.json()
-        if len(detail_body["validation_reports"]) >= expected_count:
-            return detail_body
-
-    pytest.fail(f"Expected {expected_count} validation report(s), got {detail_body}")
