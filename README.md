@@ -61,6 +61,7 @@ Orchestrator -> Agent -> Orchestrator
 - Validators do not fix code.
 - FixPlanner creates fix tasks from failed validation reports.
 - If retry or validation-loop limits are exceeded, the mission becomes `failed` and requires human intervention.
+- Decision extraction is best-effort: a failed extraction never fails the feature task it ran alongside.
 
 ## Main Concepts
 
@@ -143,6 +144,10 @@ Worker task branches are:
 mission/{mission_id_short}/task/{task_id_short}
 ```
 
+### MissionDecision
+
+A key/value fact recorded mid-mission (e.g. `auth_scheme = JWT with refresh tokens`) so later tasks in the same mission stay consistent with earlier ones. See [Mission Decision Memory](#mission-decision-memory).
+
 ### RepoProfile
 
 Automatic analysis of the cloned repository, run before planning. Detects:
@@ -163,7 +168,7 @@ The planner includes the repo profile in its prompt to generate more accurate ta
 
 ### PlannerAgent
 
-Creates milestones and feature tasks from the mission title, goal, and (when available) repo profile.
+Creates milestones and feature tasks from the mission title, goal, (when available) repo profile, and prior mission decisions recorded so far.
 
 ### SpecAgent
 
@@ -177,10 +182,11 @@ Current behavior:
 
 - Creates or checks out a task branch.
 - If `CODEX_ENABLED=false`, inspects the repository and produces a no-edit report.
-- If `CODEX_ENABLED=true`, calls the Codex CLI to perform code changes.
+- If `CODEX_ENABLED=true`, calls the Codex CLI to perform code changes, with prior mission decisions included in the prompt.
 - Captures git diff and status as an Artifact.
 - Commits if `AUTO_COMMIT=true` and there are changes.
 - Marks the feature task completed or failed.
+- If the task completed with real changes, extracts and records mission decisions for later tasks. See [Mission Decision Memory](#mission-decision-memory).
 
 ### ValidatorAgent
 
@@ -447,6 +453,21 @@ If `AUTO_COMMIT=true`, the worker commits changes with:
 Task: {feature_task.title}
 ```
 
+## Mission Decision Memory
+
+Feature tasks in the same mission run as independent Worker jobs, potentially far apart in time. Without shared memory, task 3 has no way to know that task 1 already picked JWT-with-refresh-tokens for auth, or settled on a particular error response shape. Mission decision memory closes that gap.
+
+Flow:
+
+1. When a codex-enabled Worker task completes successfully and produced a real diff, the worker makes one extra LLM call (separate from Codex itself) that reads the task title, description, and diff, and extracts a short list of `{key, value}` decisions — e.g. `auth_scheme = JWT with refresh tokens`. This runs only when there is an actual diff, so it never fires for no-edit or Codex-disabled task runs.
+2. Each decision is stored as a `MissionDecision` row scoped to the mission, tagged with the source feature task.
+3. Every later Planner and codex-enabled Worker prompt in the same mission includes a "Prior decisions in this mission" section listing all decisions recorded so far, so subsequent tasks stay consistent with earlier ones.
+
+Notes:
+
+- Decision extraction is best-effort. If the extraction call fails or returns nothing useful, the feature task itself still completes normally — extraction failures are logged and swallowed, never propagated.
+- All decisions recorded for a mission are included in later prompts; there is currently no summarization, deduplication, or cap. A mission that accumulates a very large number of decisions would need that handling added later.
+
 ## GitHub Integration
 
 ### Clone
@@ -507,6 +528,7 @@ Current tests cover:
 - GitHub service (URL parsing, push, PR creation, duplicate PR handling)
 - validator support for shell, pytest, Playwright, and Semgrep
 - full lifecycle with failed validation, fix task creation, passing validation, milestone completion, and mission completion
+- mission decision memory: extraction after a successful worker run, prompt injection for later Planner/Worker tasks, and non-fatal handling of extraction failures
 
 ## Database Migrations
 
@@ -531,6 +553,7 @@ Migration history:
 | `0002_repositories` | repositories table |
 | `0003_mission_events` | mission events table |
 | `0004_repo_profiles` | repo profiles table |
+| `0005_mission_decisions` | mission decisions table |
 
 ## Current Limitations
 
@@ -539,6 +562,7 @@ Migration history:
 - Without Codex, workers only inspect repositories and mark tasks completed.
 - Validators execute commands from the validation contract — use trusted repositories and commands.
 - The Pause/Resume buttons in the run dashboard are placeholders (no backend support yet).
+- Mission decision memory has no summarization, deduplication, or cap yet — every recorded decision is included in later prompts as-is.
 
 ## Troubleshooting
 
