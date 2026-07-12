@@ -1,3 +1,9 @@
+from app.models.memory import (
+    Memory,
+    MemoryScope,
+    MemorySource,
+    MemoryStatus,
+)
 from app.models.mission import (
     AgentRun,
     AgentRunStatus,
@@ -6,7 +12,6 @@ from app.models.mission import (
     FeatureTaskStatus,
     FeatureTaskType,
     Milestone,
-    MissionDecision,
     MissionEvent,
     MilestoneStatus,
     Mission,
@@ -27,8 +32,11 @@ __all__ = [
     "FeatureTask",
     "FeatureTaskStatus",
     "FeatureTaskType",
+    "Memory",
+    "MemoryScope",
+    "MemorySource",
+    "MemoryStatus",
     "Milestone",
-    "MissionDecision",
     "MissionEvent",
     "MilestoneStatus",
     "Mission",

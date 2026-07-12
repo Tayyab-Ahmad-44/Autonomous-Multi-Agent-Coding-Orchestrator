@@ -5,6 +5,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field
 
 from app.agents.base import AgentContext, AgentInput, AgentOutput, BaseAgent
+from app.agents.memory_prompt import format_memory_sections
 from app.services.llm_service import LLMService
 
 
@@ -68,6 +69,8 @@ class SpecAgent(BaseAgent):
                 goal=goal,
                 milestones=milestones,
                 feature_tasks=feature_tasks,
+                repo_memories=input.data.get("repo_memories"),
+                user_preferences=input.data.get("user_preferences"),
             ),
             schema_hint=_schema_hint(),
         )
@@ -98,7 +101,21 @@ Rules:
 - Return only valid JSON."""
 
 
-def _user_prompt(*, goal: str, milestones: Any, feature_tasks: Any) -> str:
+def _user_prompt(
+    *,
+    goal: str,
+    milestones: Any,
+    feature_tasks: Any,
+    repo_memories: list | None = None,
+    user_preferences: list | None = None,
+) -> str:
+    # Repo memory and user preferences matter here specifically because they constrain
+    # required_tests: a contract demanding unittest for a repo that standardised on pytest
+    # produces tests the worker cannot satisfy.
+    memory_section = format_memory_sections(
+        repo_memories=repo_memories,
+        user_preferences=user_preferences,
+    )
     return f"""Create a validation contract for this mission.
 
 Mission goal:
@@ -108,7 +125,7 @@ Generated milestones:
 {milestones}
 
 Generated feature tasks:
-{feature_tasks}"""
+{feature_tasks}{memory_section}"""
 
 
 def _schema_hint() -> dict[str, Any]:

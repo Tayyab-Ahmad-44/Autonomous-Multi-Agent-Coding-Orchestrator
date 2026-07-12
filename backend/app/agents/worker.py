@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from app.agents.base import AgentContext, AgentInput, AgentOutput, BaseAgent
+from app.agents.memory_prompt import format_memory_sections
 from app.core.config import Settings, get_settings
 from app.models import FeatureTaskStatus
 from app.services.codex_service import CodexResult, CodexService
@@ -143,8 +144,7 @@ class WorkerAgent(BaseAgent):
         feature_task: dict[str, Any],
         validation_contract: dict[str, Any] | None,
     ) -> AgentOutput:
-        mission_goal = _load_mission_goal(context)
-        mission_decisions = _load_mission_decisions(context)
+        mission_goal, memory_section = _load_mission_goal_and_memory(context)
         branch_name = _task_branch_name(context)
         git_state = _prepare_git_branch(self._git_service, repo_path, branch_name)
         task_prompt = _codex_task_prompt(
@@ -152,7 +152,7 @@ class WorkerAgent(BaseAgent):
             feature_task=feature_task,
             validation_contract=validation_contract,
             allow_commits=self._settings.codex_allow_commits,
-            mission_decisions=mission_decisions,
+            memory_section=memory_section,
         )
         result = self._codex_service.run_codex_task(
             repo_path=str(repo_path),
@@ -295,20 +295,29 @@ def _load_validation_contract(context: AgentContext) -> dict[str, Any] | None:
     }
 
 
-def _load_mission_goal(context: AgentContext) -> str:
+def _load_mission_goal_and_memory(context: AgentContext) -> tuple[str, str]:
+    """Load the mission goal and all three memory tiers in one pass.
+
+    The worker reads memory straight from the database rather than taking it in AgentInput,
+    because a worker runs in a Celery task long after the AgentRun's input was serialized - by
+    which time earlier tasks in this mission have recorded decisions the input snapshot predates.
+    """
     from app.services import missions as mission_service
 
     mission = mission_service.get_mission(context.db, context.mission_id)
     if mission is None:
-        return ""
-    return str(_safe_getattr(mission, "goal", ""))
+        return "", ""
+
+    memory_section = format_memory_sections(
+        mission_decisions=_to_entries(mission_service.list_mission_decisions(context.db, context.mission_id)),
+        repo_memories=_to_entries(mission_service.list_repo_memories(context.db, mission.repo_id)),
+        user_preferences=_to_entries(mission_service.list_user_preferences(context.db, mission.owner_id)),
+    )
+    return str(_safe_getattr(mission, "goal", "")), memory_section
 
 
-def _load_mission_decisions(context: AgentContext) -> list[dict[str, str]]:
-    from app.services import missions as mission_service
-
-    decisions = mission_service.list_mission_decisions(context.db, context.mission_id)
-    return [{"key": decision.key, "value": decision.value} for decision in decisions]
+def _to_entries(memories: list[Any]) -> list[dict[str, str]]:
+    return [{"key": memory.key, "value": memory.value} for memory in memories]
 
 
 def _store_inspection_artifacts(
@@ -481,11 +490,10 @@ def _codex_task_prompt(
     feature_task: dict[str, Any],
     validation_contract: dict[str, Any] | None,
     allow_commits: bool,
-    mission_decisions: list[dict[str, str]] | None = None,
+    memory_section: str = "",
 ) -> str:
     assertions = _format_assertions(validation_contract)
     required_tests = _format_required_tests(validation_contract)
-    decisions_section = _format_mission_decisions(mission_decisions)
     commit_rule = (
         "Commits are allowed by configuration, but only commit if this task explicitly requires it."
         if allow_commits
@@ -494,7 +502,7 @@ def _codex_task_prompt(
     return f"""You are a coding worker in a controlled multi-agent orchestrator.
 
 Mission goal:
-{mission_goal or "No mission goal was provided."}{decisions_section}
+{mission_goal or "No mission goal was provided."}{memory_section}
 
 Feature task:
 Title: {feature_task.get("title", "Untitled task")}
@@ -514,18 +522,6 @@ Rules:
 - Summarize changes and tests run in your final output.
 - {commit_rule}
 """
-
-
-def _format_mission_decisions(mission_decisions: list[dict[str, str]] | None) -> str:
-    if not mission_decisions:
-        return ""
-    lines = ["\n\nPrior decisions in this mission (stay consistent with these):"]
-    for decision in mission_decisions:
-        key = decision.get("key", "")
-        value = decision.get("value", "")
-        if key or value:
-            lines.append(f"- {key}: {value}")
-    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def _format_assertions(validation_contract: dict[str, Any] | None) -> str:

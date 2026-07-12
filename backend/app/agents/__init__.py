@@ -1,5 +1,6 @@
 from app.agents.base import AgentContext, AgentInput, AgentOutput, BaseAgent
 from app.agents.fix_planner import FixPlannerAgent
+from app.agents.memory_promoter import MemoryPromoterAgent
 from app.agents.planner import PlannerAgent
 from app.agents.registry import AgentRegistry, build_default_registry
 from app.agents.research import ResearchAgent
@@ -14,6 +15,7 @@ __all__ = [
     "AgentRegistry",
     "BaseAgent",
     "FixPlannerAgent",
+    "MemoryPromoterAgent",
     "PlannerAgent",
     "ResearchAgent",
     "SpecAgent",

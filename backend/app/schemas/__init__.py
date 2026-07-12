@@ -1,4 +1,5 @@
 from app.schemas.auth import LoginRequest, SignupRequest, TokenResponse, UserRead
+from app.schemas.preferences import PreferenceCreate, PreferenceRead
 from app.schemas.repos import RepoCreate, RepoRead
 from app.schemas.missions import (
     AgentRunRead,
@@ -31,6 +32,8 @@ __all__ = [
     "MissionRead",
     "MissionStatusUpdate",
     "OpenPrResponse",
+    "PreferenceCreate",
+    "PreferenceRead",
     "RepoCreate",
     "RepoProfileRead",
     "RepoRead",

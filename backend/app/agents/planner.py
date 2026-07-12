@@ -5,6 +5,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field
 
 from app.agents.base import AgentContext, AgentInput, AgentOutput, BaseAgent
+from app.agents.memory_prompt import format_memory_sections
 from app.services.llm_service import LLMService
 
 
@@ -52,15 +53,15 @@ class PlannerAgent(BaseAgent):
         if not title or not goal:
             raise ValueError("PlannerAgent requires mission title and goal in AgentInput.data.")
 
-        repo_profile = input.data.get("repo_profile")
-        mission_decisions = input.data.get("mission_decisions")
         raw_plan = await self._llm_service.generate_json(
             system_prompt=_system_prompt(),
             user_prompt=_user_prompt(
                 title=title,
                 goal=goal,
-                repo_profile=repo_profile,
-                mission_decisions=mission_decisions,
+                repo_profile=input.data.get("repo_profile"),
+                mission_decisions=input.data.get("mission_decisions"),
+                repo_memories=input.data.get("repo_memories"),
+                user_preferences=input.data.get("user_preferences"),
             ),
             schema_hint=_schema_hint(),
         )
@@ -96,30 +97,22 @@ def _user_prompt(
     goal: str,
     repo_profile: dict | None = None,
     mission_decisions: list | None = None,
+    repo_memories: list | None = None,
+    user_preferences: list | None = None,
 ) -> str:
     repo_section = _format_repo_profile(repo_profile)
-    decisions_section = _format_mission_decisions(mission_decisions)
+    memory_section = format_memory_sections(
+        mission_decisions=mission_decisions,
+        repo_memories=repo_memories,
+        user_preferences=user_preferences,
+    )
     return f"""Plan this mission.
 
 Mission title:
 {title}
 
 Mission goal:
-{goal}{repo_section}{decisions_section}"""
-
-
-def _format_mission_decisions(mission_decisions: list | None) -> str:
-    if not mission_decisions:
-        return ""
-    lines = ["\n\nPrior decisions in this mission (stay consistent with these):"]
-    for decision in mission_decisions:
-        if not isinstance(decision, dict):
-            continue
-        key = decision.get("key", "")
-        value = decision.get("value", "")
-        if key or value:
-            lines.append(f"- {key}: {value}")
-    return "\n".join(lines) if len(lines) > 1 else ""
+{goal}{repo_section}{memory_section}"""
 
 
 def _format_repo_profile(profile: dict | None) -> str:

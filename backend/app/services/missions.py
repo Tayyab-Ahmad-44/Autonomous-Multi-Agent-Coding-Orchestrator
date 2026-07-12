@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,8 +10,17 @@ from uuid import UUID
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session, selectinload
 
-from app.agents import AgentContext, AgentInput, FixPlannerAgent, PlannerAgent, SpecAgent, ValidatorAgent
+from app.agents import (
+    AgentContext,
+    AgentInput,
+    FixPlannerAgent,
+    MemoryPromoterAgent,
+    PlannerAgent,
+    SpecAgent,
+    ValidatorAgent,
+)
 from app.core.config import get_settings
+from app.services import memory as memory_service
 from app.services.git_service import GitService, GitServiceError
 from app.services.github_service import GitHubService, GitHubServiceError
 from app.services.repos import get_repo, parse_repo_url
@@ -21,8 +31,11 @@ from app.models import (
     FeatureTask,
     FeatureTaskStatus,
     FeatureTaskType,
+    Memory,
+    MemoryScope,
+    MemorySource,
+    MemoryStatus,
     Milestone,
-    MissionDecision,
     MissionEvent,
     MilestoneStatus,
     Mission,
@@ -35,6 +48,8 @@ from app.models import (
     ValidationReport,
 )
 
+
+logger = logging.getLogger(__name__)
 
 JsonObject = dict[str, Any]
 JsonList = list[dict[str, Any]]
@@ -563,14 +578,15 @@ async def run_planning_for_mission(
             except Exception:
                 repo_profile = None
 
-    mission_decisions = list_mission_decisions(db, mission_id)
     agent_input = AgentInput(
         instructions="Create an MVP implementation plan for this mission.",
         data={
             "title": mission.title,
             "goal": mission.goal,
             "repo_profile": _repo_profile_to_dict(repo_profile),
-            "mission_decisions": _mission_decisions_to_dicts(mission_decisions),
+            "mission_decisions": _memories_to_dicts(list_mission_decisions(db, mission_id)),
+            "repo_memories": _memories_to_dicts(list_repo_memories(db, mission.repo_id)),
+            "user_preferences": _memories_to_dicts(list_user_preferences(db, mission.owner_id)),
         },
     )
     agent_run = create_agent_run(
@@ -639,7 +655,7 @@ def _repo_profile_to_dict(profile: RepoProfile | None) -> dict | None:
     }
 
 
-def _mission_decisions_to_dicts(decisions: list[MissionDecision]) -> list[JsonObject]:
+def _memories_to_dicts(decisions: list[Memory]) -> list[JsonObject]:
     return [{"key": decision.key, "value": decision.value} for decision in decisions]
 
 
@@ -778,6 +794,8 @@ async def generate_validation_contract(
             "goal": mission.goal,
             "milestones": _milestones_for_agent(mission.milestones),
             "feature_tasks": _feature_tasks_for_agent(mission.feature_tasks),
+            "repo_memories": _memories_to_dicts(list_repo_memories(db, mission.repo_id)),
+            "user_preferences": _memories_to_dicts(list_user_preferences(db, mission.owner_id)),
         },
     )
     agent_run = create_agent_run(
@@ -1528,16 +1546,12 @@ def create_validation_report(
     return report
 
 
-def list_mission_decisions(db: Session, mission_id: UUID) -> list[MissionDecision]:
-    # Returns every decision ever recorded for the mission, unfiltered. Fine for an MVP mission
-    # size; a long-running mission accumulating many decisions would need summarization or
-    # capping here before injecting them into prompts.
-    statement = (
-        select(MissionDecision)
-        .where(MissionDecision.mission_id == mission_id)
-        .order_by(MissionDecision.created_at.asc())
+def list_mission_decisions(db: Session, mission_id: UUID) -> list[Memory]:
+    return memory_service.list_memories(
+        db,
+        scope=MemoryScope.mission,
+        owner_id=mission_id,
     )
-    return list(db.scalars(statement).all())
 
 
 def create_mission_decision(
@@ -1547,17 +1561,110 @@ def create_mission_decision(
     key: str,
     value: str,
     source_task_id: UUID | None = None,
-) -> MissionDecision:
-    decision = MissionDecision(
-        mission_id=mission_id,
-        source_task_id=source_task_id,
+) -> Memory:
+    # Repeating a key now supersedes rather than appends: a task that revises an earlier task's
+    # decision replaces it, instead of both versions being injected into later prompts.
+    return memory_service.record_memory(
+        db,
+        scope=MemoryScope.mission,
+        owner_id=mission_id,
         key=key,
         value=value,
+        source=MemorySource.extracted,
+        source_mission_id=mission_id,
+        source_task_id=source_task_id,
     )
-    db.add(decision)
-    db.commit()
-    db.refresh(decision)
-    return decision
+
+
+def list_repo_memories(db: Session, repo_id: UUID) -> list[Memory]:
+    return memory_service.list_memories(db, scope=MemoryScope.repo, owner_id=repo_id)
+
+
+def list_user_preferences(db: Session, user_id: UUID) -> list[Memory]:
+    return memory_service.list_memories(db, scope=MemoryScope.user, owner_id=user_id)
+
+
+async def promote_repo_memories_for_milestone(
+    db: Session,
+    mission_id: UUID,
+    milestone_id: UUID | None,
+    *,
+    memory_promoter_agent: MemoryPromoterAgent | None = None,
+) -> list[Memory]:
+    """Lift durable knowledge out of a milestone that just passed validation.
+
+    This is enrichment, not a mission step: a failure here is logged and swallowed, exactly as
+    task-level decision extraction is in WorkerAgent. A mission must never fail because it could
+    not learn something.
+    """
+    mission = get_mission(db, mission_id)
+    if mission is None:
+        raise MissionNotFoundError(f"Mission not found: {mission_id}")
+
+    mission_decisions = list_mission_decisions(db, mission_id)
+    if not mission_decisions:
+        return []
+
+    milestone = db.get(Milestone, milestone_id) if milestone_id else None
+    agent_input = AgentInput(
+        instructions="Promote durable repo knowledge from this milestone.",
+        data={
+            "mission_goal": mission.goal,
+            "milestone_name": milestone.name if milestone else "",
+            "mission_decisions": _memories_to_dicts(mission_decisions),
+            "repo_memories": _memories_to_dicts(list_repo_memories(db, mission.repo_id)),
+        },
+    )
+
+    try:
+        agent = memory_promoter_agent or MemoryPromoterAgent()
+        output = await agent.run(AgentContext(mission_id=mission.id, db=db), agent_input)
+        promotions = output.data.get("promotions", [])
+    except Exception:
+        logger.warning(
+            "Repo memory promotion failed for mission=%s milestone=%s",
+            mission_id,
+            milestone_id,
+            exc_info=True,
+        )
+        return []
+
+    promoted: list[Memory] = []
+    for promotion in promotions:
+        if not isinstance(promotion, dict):
+            continue
+        key = promotion.get("key")
+        value = promotion.get("value")
+        if not key or not value:
+            continue
+        promoted.append(
+            memory_service.record_memory(
+                db,
+                scope=MemoryScope.repo,
+                owner_id=mission.repo_id,
+                key=key,
+                value=value,
+                source=MemorySource.extracted,
+                source_mission_id=mission.id,
+                source_milestone_id=milestone_id,
+            )
+        )
+
+    if promoted:
+        log_mission_event(
+            db,
+            mission_id=mission.id,
+            event_type="repo_memory_promoted",
+            message=f"Promoted {len(promoted)} fact(s) to repo memory.",
+            payload={
+                "milestone_id": str(milestone_id) if milestone_id else None,
+                "repo_id": str(mission.repo_id),
+                "keys": [memory.key for memory in promoted],
+                # Growth signal: we deliberately ship no eviction policy, so watch this instead.
+                "repo_memory_size": len(list_repo_memories(db, mission.repo_id)),
+            },
+        )
+    return promoted
 
 
 def create_artifact(

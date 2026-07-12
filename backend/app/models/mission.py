@@ -157,12 +157,6 @@ class Mission(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
-    decisions: Mapped[list[MissionDecision]] = relationship(
-        "MissionDecision",
-        back_populates="mission",
-        cascade="all, delete-orphan",
-    )
-
 
 class Milestone(Base):
     __tablename__ = "milestones"
@@ -466,28 +460,3 @@ class RepoProfile(Base):
     )
 
     mission: Mapped[Mission] = relationship("Mission", back_populates="repo_profile")
-
-
-class MissionDecision(Base):
-    __tablename__ = "mission_decisions"
-
-    id: Mapped[PyUUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    mission_id: Mapped[PyUUID] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("missions.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    source_task_id: Mapped[PyUUID | None] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("feature_tasks.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    key: Mapped[str] = mapped_column(String(100), nullable=False)
-    value: Mapped[str] = mapped_column(String(500), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    )
-
-    mission: Mapped[Mission] = relationship("Mission", back_populates="decisions")

@@ -6,7 +6,7 @@ from uuid import UUID
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy.orm import Session
 
-from app.agents import FixPlannerAgent, PlannerAgent, SpecAgent, ValidatorAgent
+from app.agents import FixPlannerAgent, MemoryPromoterAgent, PlannerAgent, SpecAgent, ValidatorAgent
 from app.core.config import get_settings
 from app.models import (
     AgentRun,
@@ -32,6 +32,7 @@ class MissionGraphState(TypedDict):
     spec_agent: NotRequired[SpecAgent | None]
     validator_agent: NotRequired[ValidatorAgent | None]
     fix_planner_agent: NotRequired[FixPlannerAgent | None]
+    memory_promoter_agent: NotRequired[MemoryPromoterAgent | None]
     mission: NotRequired[Mission]
     validation_contract: NotRequired[ValidationContract]
     validation_report: NotRequired[ValidationReport]
@@ -71,6 +72,7 @@ async def run_mission_tick(
     spec_agent: SpecAgent | None = None,
     validator_agent: ValidatorAgent | None = None,
     fix_planner_agent: FixPlannerAgent | None = None,
+    memory_promoter_agent: MemoryPromoterAgent | None = None,
 ) -> MissionGraphState:
     graph = build_mission_graph()
     return await graph.ainvoke(
@@ -82,6 +84,7 @@ async def run_mission_tick(
             "spec_agent": spec_agent,
             "validator_agent": validator_agent,
             "fix_planner_agent": fix_planner_agent,
+            "memory_promoter_agent": memory_promoter_agent,
         }
     )
 
@@ -106,6 +109,7 @@ async def run_mission_until_blocked(
     *,
     validator_agent: ValidatorAgent | None = None,
     fix_planner_agent: FixPlannerAgent | None = None,
+    memory_promoter_agent: MemoryPromoterAgent | None = None,
     max_iterations: int = 50,
 ) -> MissionGraphState:
     """Repeatedly tick the mission graph until it hits a state that requires
@@ -120,6 +124,7 @@ async def run_mission_until_blocked(
             mission_id,
             validator_agent=validator_agent,
             fix_planner_agent=fix_planner_agent,
+            memory_promoter_agent=memory_promoter_agent,
         )
         if state.get("next_step") in _PAUSE_STEPS:
             break
@@ -312,6 +317,15 @@ async def decide_next_step(state: MissionGraphState) -> MissionGraphState:
 
     if report.passed:
         mission = mission_service.advance_after_passed_validation(state["db"], state["mission_id"])
+        # A milestone that passed its validation contract is the earliest vetted evidence we have,
+        # so this is where durable repo knowledge gets lifted out of the mission. Enrichment only:
+        # it never raises, and it never changes the routing below.
+        await mission_service.promote_repo_memories_for_milestone(
+            state["db"],
+            state["mission_id"],
+            report.milestone_id,
+            memory_promoter_agent=state.get("memory_promoter_agent"),
+        )
         next_step = "complete_mission" if mission.status == MissionStatus.completed else "milestone_advanced"
         return {
             **state,

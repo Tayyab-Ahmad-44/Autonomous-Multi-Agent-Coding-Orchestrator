@@ -1,5 +1,6 @@
 from app.agents.base import BaseAgent
 from app.agents.fix_planner import FixPlannerAgent
+from app.agents.memory_promoter import MemoryPromoterAgent
 from app.agents.planner import PlannerAgent
 from app.agents.research import ResearchAgent
 from app.agents.spec import SpecAgent
@@ -33,6 +34,7 @@ def build_default_registry() -> AgentRegistry:
         WorkerAgent(),
         ValidatorAgent(),
         FixPlannerAgent(),
+        MemoryPromoterAgent(),
     ):
         registry.register(agent)
     return registry
