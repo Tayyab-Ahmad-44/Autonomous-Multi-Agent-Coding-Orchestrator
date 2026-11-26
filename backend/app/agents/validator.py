@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from app.agents.base import AgentContext, AgentInput, AgentOutput, BaseAgent
+from app.agents.environment import prepare_mission_environment
 from app.services.sandbox_service import SandboxResult, SandboxService
 
 
@@ -20,10 +21,12 @@ class ValidatorAgent(BaseAgent):
         if context.repo_path is None:
             raise ValueError("ValidatorAgent requires repo_path in AgentContext.")
 
+        prepare_mission_environment(context)
         contract = _validation_contract_from_input(context, input)
         milestone = input.data.get("milestone")
         milestone_id = _milestone_id(milestone)
         required_tests = _required_tests(contract)
+        later_milestones_pending = _has_later_milestones(context, milestone)
 
         results: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
@@ -67,6 +70,24 @@ class ValidatorAgent(BaseAgent):
                 timeout_seconds=int(test.get("timeout_seconds", 300)),
             )
             result_data = _validation_result_to_dict(test, result)
+            if (
+                test_type in {"pytest", "shell"}
+                and result.exit_code == _PYTEST_NO_TESTS_COLLECTED
+                and later_milestones_pending
+                and "pytest" in command
+            ):
+                # The contract covers the whole mission, so its tests often
+                # land in a later milestone. "No tests collected" before then
+                # is expected, not a failure; the final milestone still
+                # enforces it.
+                skipped.append(
+                    {
+                        "name": test.get("name"),
+                        "type": test_type,
+                        "reason": "pytest collected no tests yet; deferred to a later milestone.",
+                    }
+                )
+                continue
             if test_type == "playwright":
                 playwright_artifact_ids = _store_playwright_artifacts(context)
                 result_data["artifact_ids"] = playwright_artifact_ids
@@ -156,6 +177,23 @@ def _required_tests(contract: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(required_tests, list):
         raise ValueError("Validation contract required_tests must be a list.")
     return [test for test in required_tests if isinstance(test, dict)]
+
+
+_PYTEST_NO_TESTS_COLLECTED = 5
+
+
+def _has_later_milestones(context: AgentContext, milestone: Any) -> bool:
+    if not isinstance(milestone, dict) or milestone.get("order_index") is None or context.db is None:
+        return False
+    from sqlalchemy import select
+
+    from app.models import Milestone
+
+    statement = select(Milestone.id).where(
+        Milestone.mission_id == context.mission_id,
+        Milestone.order_index > int(milestone["order_index"]),
+    )
+    return context.db.scalars(statement).first() is not None
 
 
 def _milestone_id(milestone: Any) -> UUID | None:

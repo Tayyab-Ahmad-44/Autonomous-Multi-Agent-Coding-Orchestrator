@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from app.agents.base import AgentContext, AgentInput, AgentOutput, BaseAgent
+from app.agents.environment import prepare_mission_environment
 from app.agents.memory_prompt import format_memory_sections
 from app.core.config import Settings, get_settings
 from app.models import FeatureTaskStatus
@@ -77,6 +78,7 @@ class WorkerAgent(BaseAgent):
                 "Clone the repository before running the mission."
             )
 
+        prepare_mission_environment(context)
         validation_contract = _load_validation_contract(context)
         feature_task = input.data
         if self._settings.codex_enabled:
@@ -146,7 +148,13 @@ class WorkerAgent(BaseAgent):
     ) -> AgentOutput:
         mission_goal, memory_section = _load_mission_goal_and_memory(context)
         branch_name = _task_branch_name(context)
-        git_state = _prepare_git_branch(self._git_service, repo_path, branch_name)
+        mission_branch = _mission_branch_name(context)
+        git_state = _prepare_git_branch(
+            self._git_service,
+            repo_path,
+            branch_name,
+            base_branch=mission_branch,
+        )
         task_prompt = _codex_task_prompt(
             mission_goal=mission_goal,
             feature_task=feature_task,
@@ -170,6 +178,14 @@ class WorkerAgent(BaseAgent):
                 f"Task: {feature_task.get('title', 'Untitled task')}",
             )
             latest_commit = self._git_service.get_latest_commit(str(repo_path))
+        merge_output = _return_to_mission_branch(
+            self._git_service,
+            repo_path,
+            git_state,
+            task_branch=branch_name,
+            mission_branch=mission_branch,
+            merge=bool(commit_output),
+        )
         diff_artifact_id = _store_git_diff_artifact(
             context,
             branch_name=branch_name,
@@ -182,7 +198,20 @@ class WorkerAgent(BaseAgent):
         artifact_ids = [artifact_id]
         if diff_artifact_id is not None:
             artifact_ids.append(diff_artifact_id)
-        task_status = FeatureTaskStatus.completed if result.exit_code == 0 else FeatureTaskStatus.failed
+        # Codex can exit 0 while reporting that it was blocked (e.g. a broken
+        # sandbox). A code-writing task that changed nothing is not done.
+        # A run with no changes only counts when Codex explicitly confirms the
+        # existing code already satisfies the task (e.g. an earlier fix task
+        # did the work).
+        no_op = (
+            result.exit_code == 0
+            and git_state["is_git_repo"]
+            and not git_has_changes
+            and str(feature_task.get("task_type", "")) not in _NO_EDIT_TASK_TYPES
+            and _codex_status(result.stdout) != "DONE"
+        )
+        succeeded = result.exit_code == 0 and not no_op
+        task_status = FeatureTaskStatus.completed if succeeded else FeatureTaskStatus.failed
         _mark_feature_task_status(context, task_status)
 
         if task_status == FeatureTaskStatus.completed and git_has_changes:
@@ -192,12 +221,13 @@ class WorkerAgent(BaseAgent):
                 diff_text=git_diff or git_status,
             )
 
-        status = "completed" if result.exit_code == 0 else "failed"
-        summary = (
-            "Codex CLI completed the worker task."
-            if result.exit_code == 0
-            else f"Codex CLI failed with exit code {result.exit_code}."
-        )
+        status = "completed" if succeeded else "failed"
+        if succeeded:
+            summary = "Codex CLI completed the worker task."
+        elif no_op:
+            summary = "Codex CLI exited without changing any files. " + _last_lines(result.stdout)
+        else:
+            summary = f"Codex CLI failed with exit code {result.exit_code}."
         return AgentOutput(
             agent_type=self.agent_type,
             status=status,
@@ -217,6 +247,8 @@ class WorkerAgent(BaseAgent):
                     "auto_commit": self._settings.auto_commit,
                     "commit_output": commit_output,
                     "latest_commit": latest_commit,
+                    "mission_branch": mission_branch,
+                    "merge_output": merge_output,
                 },
                 "artifact_ids": artifact_ids,
             },
@@ -435,10 +467,57 @@ def _task_branch_name(context: AgentContext) -> str:
     return f"task/{mission_short}/{task_short}"
 
 
+_NO_EDIT_TASK_TYPES = {"research", "planning"}
+
+
+def _mission_branch_name(context: AgentContext) -> str:
+    # Must match the branch created on clone and pushed by open-pr.
+    return f"mission/{str(context.mission_id)[:8]}"
+
+
+def _codex_status(stdout: str | None) -> str | None:
+    """Last `STATUS: X` line Codex printed, per the prompt's final rule."""
+    for line in reversed((stdout or "").strip().splitlines()):
+        cleaned = line.strip().strip("*`").strip()
+        if cleaned.upper().startswith("STATUS:"):
+            return cleaned.split(":", 1)[1].strip().strip("*`").upper()
+    return None
+
+
+def _last_lines(text: str | None, limit: int = 400) -> str:
+    return (text or "").strip()[-limit:]
+
+
+def _return_to_mission_branch(
+    git_service: GitService,
+    repo_path: Path,
+    git_state: dict[str, Any],
+    *,
+    task_branch: str,
+    mission_branch: str,
+    merge: bool,
+) -> str | None:
+    """Switch back to the mission branch and fold the task's commits into it,
+    so open-pr (which pushes the mission branch) includes every task's work.
+    Uncommitted changes (AUTO_COMMIT=false) carry over on checkout.
+    """
+    if not git_state["is_git_repo"] or not git_state.get("based_on_mission_branch"):
+        return None
+    try:
+        git_service.checkout_branch(str(repo_path), mission_branch)
+        if merge:
+            return git_service.merge_branch(str(repo_path), task_branch)
+    except GitServiceError as exc:
+        return f"Failed to merge {task_branch} into {mission_branch}: {exc}"
+    return None
+
+
 def _prepare_git_branch(
     git_service: GitService,
     repo_path: Path,
     branch_name: str,
+    *,
+    base_branch: str | None = None,
 ) -> dict[str, Any]:
     state: dict[str, Any] = {
         "is_git_repo": False,
@@ -446,12 +525,27 @@ def _prepare_git_branch(
         "branch_ready": False,
         "starting_branch": None,
         "checkout_action": None,
+        "based_on_mission_branch": False,
     }
     if not git_service.is_git_repo(str(repo_path)):
         return state
 
     state["is_git_repo"] = True
+    ensure_excludes = getattr(git_service, "ensure_local_excludes", None)
+    if ensure_excludes is not None:
+        try:
+            ensure_excludes(str(repo_path))
+        except Exception:  # noqa: BLE001 - never block a task on excludes
+            pass
     state["starting_branch"] = git_service.current_branch(str(repo_path))
+    # Branch every task off the mission branch, not whatever the previous task
+    # left checked out.
+    if base_branch and git_service.branch_exists(str(repo_path), base_branch):
+        try:
+            git_service.checkout_branch(str(repo_path), base_branch)
+            state["based_on_mission_branch"] = True
+        except GitServiceError:
+            pass
     try:
         git_service.checkout_branch(str(repo_path), branch_name)
         state["checkout_action"] = "checkout_existing"
@@ -521,6 +615,16 @@ Rules:
 - Do not delete unrelated code.
 - Summarize changes and tests run in your final output.
 - {commit_rule}
+- The repository's dependencies are installed in the active virtualenv ($VIRTUAL_ENV); run tests with it.
+- Never edit files unrelated to this task to work around missing packages or import errors.
+  If a dependency is genuinely missing, add it to the project's requirements file.
+- If the app requires settings or secrets (API keys, URLs) just to import, provide dummy
+  values in test setup (e.g. a conftest.py that sets environment variables) instead of
+  changing application code.
+- Do not commit generated files such as logs or caches.
+- End your final output with exactly one status line:
+  "STATUS: DONE" if the task is complete (including when the existing code already satisfies it),
+  or "STATUS: BLOCKED" if you could not inspect, edit, or test the repository.
 """
 
 

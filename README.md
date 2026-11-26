@@ -239,6 +239,12 @@ Backend variables:
 | `CELERY_TASK_ALWAYS_EAGER` | `false` | Runs Celery tasks inline when true |
 | `CODEX_ENABLED` | `false` | Enables Codex CLI-backed worker execution |
 | `CODEX_COMMAND` | `codex` | Codex CLI command name |
+| `CODEX_SANDBOX` | `workspace-write` | Codex sandbox mode; `exec` defaults to read-only, which blocks edits |
+| `CODEX_MODEL` | empty | Optional model override (else `~/.codex/config.toml`) |
+| `CODEX_REASONING_EFFORT` | empty | Optional reasoning effort override |
+| `CODEX_AUTH` | `chatgpt` | `api_key` passes `OPENAI_API_KEY` to Codex (as `CODEX_API_KEY`) for orchestrator runs only, billed per token |
+| `MISSION_ENV_ENABLED` | `true` | Create a per-mission virtualenv with the repo's requirements before running tests/Codex |
+| `MISSION_PYTHON_VERSION` | `3.12` | Python version for mission virtualenvs (via `uv`) |
 | `CODEX_ALLOW_COMMITS` | `false` | Tells Codex whether commits are allowed in prompt rules |
 | `AUTO_COMMIT` | `false` | Worker commits changes after Codex if true |
 | `WORKSPACE_ROOT` | `/workspaces` | Root directory for cloned mission repositories |
@@ -252,6 +258,39 @@ Frontend variables go in `frontend/.env.local`:
 
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+## Run in Docker (recommended)
+
+The API and the Celery worker run in containers that share a `workspaces`
+volume. The container is the sandbox: Codex runs there with full access to the
+mission workspace, and test commands from validation contracts never run on
+your machine. (`SANDBOX_PROVIDER=e2b` is the planned hosted equivalent and is
+not implemented yet.)
+
+1. Fill in `backend/.env` (start from `.env.example`). Container-specific
+   values (database/Redis hosts, `WORKSPACE_ROOT`, `CODEX_COMMAND`,
+   `CODEX_SANDBOX`) are set by `docker-compose.yml` and override the file.
+2. Codex auth inside the container: set `CODEX_AUTH=api_key` (uses
+   `OPENAI_API_KEY`), since the container has no ChatGPT login.
+3. Set `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and
+   `GIT_COMMITTER_EMAIL` so worker commits are attributed to you.
+4. Start everything:
+
+```powershell
+docker compose --profile app up --build
+```
+
+5. Run the frontend on the host (`cd frontend; npm.cmd run dev`) and open
+   http://localhost:3000/missions.
+
+`docker compose up` without the profile still starts only Postgres and Redis,
+for running the backend directly on the host.
+
+Inspect a mission's workspace:
+
+```powershell
+docker compose exec worker ls /workspaces/missions
 ```
 
 ## Run Dependencies
@@ -618,6 +657,22 @@ https://x-access-token:{GITHUB_TOKEN}@github.com/org/repo.git
 ```
 
 Or set `GITHUB_TOKEN` in `.env` — the clone service does not use it automatically; provide an authenticated URL directly.
+
+### Codex reports "sandbox helper not found" on Windows
+
+If `~/.codex/config.toml` sets `[windows] sandbox = "elevated"` but the helper
+(`codex-windows-sandbox-setup.exe`) is missing, Codex can't run any command and
+the worker task fails with "Codex CLI exited without changing any files". Use
+the unelevated sandbox for orchestrator runs. Config overrides must come
+**after** `exec`, or Codex ignores them:
+
+```env
+CODEX_COMMAND=codex exec -c windows.sandbox="unelevated"
+```
+
+### Codex says the model is not supported with a ChatGPT account
+
+Set `CODEX_MODEL` to a model your account can use (see `~/.codex/models_cache.json`).
 
 ### Open PR fails with "GITHUB_TOKEN is not configured"
 

@@ -236,7 +236,9 @@ def test_mission_lifecycle_failed_validation_fix_then_completion(
     second_task_run_id = str(delay.call_args.args[0])
 
     first_pass_body = client.get(f"/missions/{mission_id}").json()
-    assert first_pass_body["validation_reports"][0]["passed"] is True
+    # SQLite timestamps have 1s resolution, so report order can tie; check
+    # that the fix produced a passing report rather than relying on order.
+    assert [r["passed"] for r in first_pass_body["validation_reports"]].count(True) == 1
     assert first_pass_body["milestones"][0]["status"] == "completed"
     assert first_pass_body["milestones"][1]["status"] == "running"
     assert first_pass_body["status"] == MissionStatus.running.value
@@ -250,7 +252,7 @@ def test_mission_lifecycle_failed_validation_fix_then_completion(
     completed_body = client.get(f"/missions/{mission_id}").json()
     assert completed_body["status"] == MissionStatus.completed.value
     assert all(milestone["status"] == "completed" for milestone in completed_body["milestones"])
-    assert completed_body["validation_reports"][0]["passed"] is True
+    assert [r["passed"] for r in completed_body["validation_reports"]].count(True) == 2
 
     with lifecycle_context.session_local() as db:
         agent_runs = db.scalars(select(AgentRun)).all()

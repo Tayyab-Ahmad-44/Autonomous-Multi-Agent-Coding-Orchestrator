@@ -135,6 +135,9 @@ class CeleryWorkerTests(TestCase):
         def fake_git_run(command, cwd, capture_output, text):
             if command[1:] == ["rev-parse", "--is-inside-work-tree"]:
                 return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
+            if command[1:4] == ["rev-parse", "--verify", "--quiet"]:
+                # No mission branch in this fake repo; the task branches off HEAD.
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
             if command[1:] == ["rev-parse", "--abbrev-ref", "HEAD"]:
                 return subprocess.CompletedProcess(command, 0, stdout=f"{current_branch['name']}\n", stderr="")
             if command[1:] == ["checkout", branch_name]:

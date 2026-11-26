@@ -31,7 +31,7 @@ class CodexServiceTests(TestCase):
             result = service.run_codex_task(str(self.repo_path), "do work")
 
         command = run.call_args.args[0]
-        self.assertEqual(command, ["codex-test", "exec", "do work"])
+        self.assertEqual(command, ["codex-test", "exec", "--sandbox", "workspace-write", "do work"])
         self.assertEqual(Path(run.call_args.kwargs["cwd"]), self.repo_path.resolve())
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.stdout, "done")
@@ -75,3 +75,48 @@ class CodexServiceTests(TestCase):
 
         with self.assertRaisesRegex(ValueError, "prompt must not be empty"):
             service.run_codex_task(str(self.repo_path), " ")
+
+
+def test_codex_command_adds_model_and_effort_overrides():
+    from app.services.codex_service import _codex_command
+
+    command = _codex_command(
+        "codex",
+        "do work",
+        sandbox="workspace-write",
+        model="gpt-5.4",
+        reasoning_effort="medium",
+    )
+
+    assert command == [
+        "codex", "exec", "--sandbox", "workspace-write",
+        "--model", "gpt-5.4", "-c", "model_reasoning_effort=medium", "do work",
+    ]
+
+
+def test_api_key_auth_passes_key_only_to_codex(tmp_path):
+    from unittest.mock import patch
+    import subprocess as sp
+    from app.core.config import Settings
+    from app.services.codex_service import CodexService
+
+    service = CodexService(settings=Settings(codex_auth="api_key", openai_api_key="sk-test"))
+    done = sp.CompletedProcess(["codex"], 0, stdout="ok", stderr="")
+    with patch("app.services.codex_service.subprocess.run", return_value=done) as run:
+        service.run_codex_task(str(tmp_path), "do work")
+    assert run.call_args.kwargs["env"]["CODEX_API_KEY"] == "sk-test"
+    assert "sk-test" not in " ".join(run.call_args.args[0])
+
+
+def test_chatgpt_auth_does_not_inject_key(tmp_path):
+    from unittest.mock import patch
+    import subprocess as sp
+    from app.core.config import Settings
+    from app.services.codex_service import CodexService
+
+    service = CodexService(settings=Settings(codex_auth="chatgpt", openai_api_key="sk-test"))
+    done = sp.CompletedProcess(["codex"], 0, stdout="ok", stderr="")
+    with patch("app.services.codex_service.subprocess.run", return_value=done) as run:
+        service.run_codex_task(str(tmp_path), "do work")
+    env = run.call_args.kwargs["env"]
+    assert env is None or "CODEX_API_KEY" not in env

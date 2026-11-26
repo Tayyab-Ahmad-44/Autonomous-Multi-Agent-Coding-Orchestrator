@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import Settings, get_settings
+from app.services.mission_environment import mission_env_vars
 
 
 @dataclass(slots=True)
@@ -72,9 +73,13 @@ class LocalSandboxProvider(BaseSandboxProvider):
             completed = subprocess.run(
                 normalized_command,
                 cwd=working_dir,
+                env=mission_env_vars(working_dir),
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 shell=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds,
             )
             duration = time.monotonic() - started

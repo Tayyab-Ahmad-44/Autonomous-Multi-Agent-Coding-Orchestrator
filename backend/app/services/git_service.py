@@ -9,6 +9,18 @@ class GitServiceError(RuntimeError):
     pass
 
 
+GENERATED_FILE_PATTERNS = (
+    "*.log",
+    "logs/",
+    "__pycache__/",
+    ".pytest_cache/",
+    ".venv/",
+    "node_modules/",
+    "test-results/",
+    "playwright-report/",
+)
+
+
 @dataclass(slots=True)
 class GitResult:
     command: list[str]
@@ -76,6 +88,35 @@ class GitService:
             return result.stdout.strip() or result.stderr.strip()
         result = self._run_git(path, ["checkout", "-b", branch])
         return result.stdout.strip() or result.stderr.strip()
+
+    def ensure_local_excludes(self, path: str, patterns: tuple[str, ...] = GENERATED_FILE_PATTERNS) -> None:
+        """Keep generated files (logs, caches) out of worker commits without
+        touching the repo's own .gitignore, via .git/info/exclude."""
+        result = self._run_git(path, ["rev-parse", "--git-path", "info/exclude"], check=False)
+        if result.exit_code != 0 or not result.stdout.strip():
+            return
+        exclude = Path(path) / result.stdout.strip()
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        missing = [p for p in patterns if p not in existing.splitlines()]
+        if missing:
+            header = "" if "# agent-orchestrator" in existing else "\n# agent-orchestrator: generated files\n"
+            with exclude.open("a", encoding="utf-8") as handle:
+                handle.write(header + "\n".join(missing) + "\n")
+
+    def branch_exists(self, path: str, branch: str) -> bool:
+        result = self._run_git(path, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], check=False)
+        return result.exit_code == 0
+
+    def merge_branch(self, path: str, branch: str) -> str:
+        """Merge `branch` into the currently checked-out branch."""
+        result = self._run_git(path, ["merge", "--no-edit", branch])
+        return result.stdout.strip() or result.stderr.strip()
+
+    def commits_ahead(self, path: str, base: str, head: str) -> int:
+        """Number of commits on `head` that are not on `base`."""
+        result = self._run_git(path, ["rev-list", "--count", f"{base}..{head}"])
+        return int(result.stdout.strip() or 0)
 
     def get_remote_url(self, path: str) -> str:
         result = self._run_git(path, ["remote", "get-url", "origin"])
