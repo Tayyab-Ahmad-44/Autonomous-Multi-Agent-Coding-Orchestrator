@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.base import AgentContext, AgentInput, AgentOutput, BaseAgent
 from app.agents.memory_prompt import format_memory_sections
+from app.agents.planner import _format_repo_profile
 from app.services.llm_service import LLMService
 
 
@@ -69,6 +70,7 @@ class SpecAgent(BaseAgent):
                 goal=goal,
                 milestones=milestones,
                 feature_tasks=feature_tasks,
+                repo_profile=input.data.get("repo_profile"),
                 repo_memories=input.data.get("repo_memories"),
                 user_preferences=input.data.get("user_preferences"),
             ),
@@ -98,6 +100,13 @@ Rules:
 - Include required tests where relevant.
 - Use only these validation_method values: unit_test, integration_test, browser_test, manual_review, security_scan.
 - Use only these required test type values: pytest, playwright, shell, semgrep, manual.
+- Required test commands run from the repository root. If the repository profile lists test
+  commands (e.g. "cd backend && pytest"), use those exact commands; never assume the app lives
+  at the root.
+- Prefer the project's test suite over ad-hoc checks. Do not add import or smoke commands
+  (e.g. python -c "import app") that load the application outside its tests.
+- Tests must not need real external services or real secrets (API keys, databases); they
+  should use dummy values or mocks.
 - Return only valid JSON."""
 
 
@@ -106,6 +115,7 @@ def _user_prompt(
     goal: str,
     milestones: Any,
     feature_tasks: Any,
+    repo_profile: dict | None = None,
     repo_memories: list | None = None,
     user_preferences: list | None = None,
 ) -> str:
@@ -125,7 +135,7 @@ Generated milestones:
 {milestones}
 
 Generated feature tasks:
-{feature_tasks}{memory_section}"""
+{feature_tasks}{_format_repo_profile(repo_profile)}{memory_section}"""
 
 
 def _schema_hint() -> dict[str, Any]:

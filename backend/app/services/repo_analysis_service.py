@@ -26,14 +26,21 @@ class RepoAnalysisService:
         profile = RepoProfileData()
         raw: dict = {}
 
-        # Collect file presence
-        package_json = _read_json(root / "package.json")
-        pyproject = _read_text(root / "pyproject.toml")
-        requirements = _read_text(root / "requirements.txt")
-        poetry_lock = (root / "poetry.lock").exists()
-        pnpm_lock = (root / "pnpm-lock.yaml").exists()
-        package_lock = (root / "package-lock.json").exists()
-        yarn_lock = (root / "yarn.lock").exists()
+        # Collect file presence. Manifests at the root win; if a manifest type is
+        # missing at the root, fall back to common monorepo subfolders
+        # (e.g. backend/requirements.txt + frontend/package.json).
+        js_dir = _find_manifest_dir(root, ("package.json",))
+        py_dir = _find_manifest_dir(root, ("pyproject.toml", "requirements.txt"))
+        raw["js_manifest_dir"] = _rel_dir(root, js_dir)
+        raw["py_manifest_dir"] = _rel_dir(root, py_dir)
+
+        package_json = _read_json(js_dir / "package.json") if js_dir else None
+        pyproject = _read_text(py_dir / "pyproject.toml") if py_dir else None
+        requirements = _read_text(py_dir / "requirements.txt") if py_dir else None
+        poetry_lock = bool(py_dir) and (py_dir / "poetry.lock").exists()
+        pnpm_lock = bool(js_dir) and (js_dir / "pnpm-lock.yaml").exists()
+        package_lock = bool(js_dir) and (js_dir / "package-lock.json").exists()
+        yarn_lock = bool(js_dir) and (js_dir / "yarn.lock").exists()
         has_dockerfile = (root / "Dockerfile").exists() or (root / "dockerfile").exists()
         has_compose = (root / "docker-compose.yml").exists() or (root / "docker-compose.yaml").exists()
         readme_text = _read_text(root / "README.md") or _read_text(root / "readme.md")
@@ -89,28 +96,33 @@ class RepoAnalysisService:
                 profile.backend_framework = "Fastify"
 
         # Language
-        if pyproject or requirements:
+        if (pyproject or requirements) and package_json:
+            profile.language = "Python + JavaScript/TypeScript"
+        elif pyproject or requirements:
             profile.language = "Python"
-        elif package_json and not profile.language:
+        elif package_json:
             profile.language = "JavaScript/TypeScript"
+
+        js_prefix = _cd_prefix(root, js_dir)
+        py_prefix = _cd_prefix(root, py_dir)
 
         # Test commands
         if package_json:
             scripts = package_json.get("scripts", {})
             test_script = scripts.get("test")
             if test_script:
-                profile.test_commands.append(f"npm test")
-        if pyproject and "pytest" in pyproject:
-            profile.test_commands.append("pytest")
-        elif requirements and "pytest" in requirements:
-            profile.test_commands.append("pytest")
+                profile.test_commands.append(f"{js_prefix}npm test")
+        if pyproject or requirements:
+            # pytest is always installed into the mission environment, so a
+            # Python project can be tested with it even if it doesn't list it.
+            profile.test_commands.append(f"{py_prefix}pytest")
 
         # Build commands
         if package_json:
             scripts = package_json.get("scripts", {})
             if "build" in scripts:
-                mgr = profile.package_manager or "npm"
-                profile.build_commands.append(f"{mgr} run build")
+                js_mgr = "pnpm" if pnpm_lock else "yarn" if yarn_lock else "npm"
+                profile.build_commands.append(f"{js_prefix}{js_mgr} run build")
 
         # Docker / CI
         profile.has_docker = has_dockerfile or has_compose
@@ -133,11 +145,45 @@ class RepoAnalysisService:
         return profile
 
 
+_MONOREPO_SUBDIRS = ("backend", "frontend", "server", "client", "api", "web", "app", "src")
+
+
+def _find_manifest_dir(root: Path, names: tuple[str, ...]) -> Path | None:
+    for directory in (root, *(root / sub for sub in _MONOREPO_SUBDIRS)):
+        if any((directory / name).is_file() for name in names):
+            return directory
+    return None
+
+
+def _rel_dir(root: Path, directory: Path | None) -> str | None:
+    if directory is None:
+        return None
+    rel = directory.relative_to(root).as_posix()
+    return "." if rel in ("", ".") else rel
+
+
+def _cd_prefix(root: Path, directory: Path | None) -> str:
+    rel = _rel_dir(root, directory)
+    return "" if rel in (None, ".") else f"cd {rel} && "
+
+
 def _read_text(path: Path) -> str | None:
+    """Read a repo file as text, handling UTF-16/UTF-8 BOMs.
+
+    Files written by Windows tools (e.g. PowerShell `>` redirects) are often
+    UTF-16. Decoding those as UTF-8 leaves NUL bytes that PostgreSQL rejects.
+    """
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        data = path.read_bytes()
     except (OSError, PermissionError):
         return None
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = data.decode("utf-16", errors="replace")
+    elif data.startswith(b"\xef\xbb\xbf"):
+        text = data[3:].decode("utf-8", errors="replace")
+    else:
+        text = data.decode("utf-8", errors="replace")
+    return text.replace("\x00", "")
 
 
 def _read_json(path: Path) -> dict | None:

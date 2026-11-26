@@ -96,6 +96,12 @@ class FakeGitService:
     def get_latest_commit(self, path: str) -> str:
         return "abc123"
 
+    def branch_exists(self, path: str, branch: str) -> bool:
+        return True
+
+    def merge_branch(self, path: str, branch: str) -> str:
+        return f"merged {branch}"
+
 
 class FakeDecisionLLM:
     def __init__(self, decisions: list[dict[str, str]]) -> None:

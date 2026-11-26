@@ -169,6 +169,11 @@ def get_mission_with_details(db: Session, mission_id: UUID) -> Mission | None:
             selectinload(Mission.repo_profile),
         )
         .where(Mission.id == mission_id)
+        # The orchestrator reloads the mission on every tick within one session.
+        # Without populate_existing, already-loaded collections (e.g. feature
+        # tasks) stay stale when the session doesn't expire on commit, so newly
+        # created fix tasks are invisible and validation loops re-run forever.
+        .execution_options(populate_existing=True)
     )
     return db.scalars(statement).first()
 
@@ -288,6 +293,16 @@ class CloneResult:
     current_branch: str
 
 
+def _ensure_generated_files_excluded(git_svc: GitService, path: str) -> None:
+    ensure = getattr(git_svc, "ensure_local_excludes", None)
+    if ensure is None:
+        return
+    try:
+        ensure(path)
+    except Exception:  # noqa: BLE001 - excludes are a nicety, never block a clone
+        pass
+
+
 def clone_mission_repository(
     db: Session,
     *,
@@ -320,6 +335,7 @@ def clone_mission_repository(
         mission_branch = f"mission/{str(mission_id)[:8]}"
         git_svc.create_or_checkout_branch(workspace_str, mission_branch)
         current_branch = git_svc.current_branch(workspace_str)
+        _ensure_generated_files_excluded(git_svc, workspace_str)
     except GitServiceError as exc:
         raise RuntimeError(f"Git operation failed: {exc}") from exc
 
@@ -794,6 +810,7 @@ async def generate_validation_contract(
             "goal": mission.goal,
             "milestones": _milestones_for_agent(mission.milestones),
             "feature_tasks": _feature_tasks_for_agent(mission.feature_tasks),
+            "repo_profile": _repo_profile_to_dict(get_repo_profile(db, mission_id)),
             "repo_memories": _memories_to_dicts(list_repo_memories(db, mission.repo_id)),
             "user_preferences": _memories_to_dicts(list_user_preferences(db, mission.owner_id)),
         },
@@ -1695,6 +1712,34 @@ class OpenPrResult:
     branch: str
 
 
+def _prepare_mission_branch_for_pr(
+    local_path: str,
+    *,
+    mission_branch: str,
+    base_branch: str,
+    commit_message: str,
+) -> None:
+    """Make sure the mission branch actually carries the mission's work.
+
+    Commits any uncommitted worker changes (AUTO_COMMIT=false) and refuses to
+    open a PR with no commits, which GitHub would reject anyway.
+    """
+    git = GitService()
+    if not git.is_git_repo(local_path):
+        return
+    try:
+        git.checkout_branch(local_path, mission_branch)
+        if git.status(local_path).strip():
+            git.commit_all(local_path, commit_message)
+        ahead = git.commits_ahead(local_path, base_branch, mission_branch)
+    except GitServiceError as exc:
+        raise RuntimeError(f"Could not prepare {mission_branch} for a PR: {exc}") from exc
+    if ahead == 0:
+        raise MissionNotReadyError(
+            f"Branch {mission_branch} has no changes compared to {base_branch}; nothing to open a PR for."
+        )
+
+
 def open_mission_pr(
     db: Session,
     *,
@@ -1714,6 +1759,12 @@ def open_mission_pr(
         raise MissionNotReadyError("Repository is not a GitHub repository.")
 
     mission_branch = f"mission/{str(mission_id)[:8]}"
+    _prepare_mission_branch_for_pr(
+        repository.local_path,
+        mission_branch=mission_branch,
+        base_branch=repository.default_branch,
+        commit_message=f"Mission: {mission.title}",
+    )
 
     try:
         github.push_branch(

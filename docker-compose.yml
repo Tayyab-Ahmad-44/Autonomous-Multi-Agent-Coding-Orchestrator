@@ -9,12 +9,57 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
 
+  # API and worker run from the same image and share the mission workspace
+  # volume: the API clones repos into it, the worker edits/tests them there.
+  # The container is the sandbox, so Codex runs with full access inside it and
+  # never touches the host. Start with: docker compose --profile app up --build
+  api:
+    profiles: ["app"]
+    build: ./backend
+    image: agent-orchestrator-backend:local
+    env_file: ./backend/.env
+    environment: &container_env
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/agent_orchestrator
+      REDIS_URL: redis://redis:6379/0
+      WORKSPACE_ROOT: /workspaces
+      CODEX_COMMAND: codex exec
+      CODEX_SANDBOX: danger-full-access
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - workspaces:/workspaces
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    profiles: ["app"]
+    image: agent-orchestrator-backend:local
+    pull_policy: never
+    env_file: ./backend/.env
+    environment: *container_env
+    command: celery -A app.workers.celery_app.celery_app worker --loglevel=info --concurrency=1
+    volumes:
+      - workspaces:/workspaces
+      - uv_cache:/root/.cache/uv
+    depends_on:
+      api:
+        condition: service_started
+
 volumes:
   postgres_data:
-
+  workspaces:
+  uv_cache:
